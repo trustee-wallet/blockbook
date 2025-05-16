@@ -5,16 +5,17 @@ After=network.target
 Wants={{.Backend.PackageName}}.service
 
 [Service]
-ExecStart={{.Env.BlockbookInstallPath}}/{{.Coin.Alias}}/bin/blockbook -blockchaincfg={{.Env.BlockbookInstallPath}}/{{.Coin.Alias}}/config/blockchaincfg.json -datadir={{.Env.BlockbookDataPath}}/{{.Coin.Alias}}/blockbook/db -sync -internal={{template "Blockbook.InternalBindingTemplate" .}} -public={{template "Blockbook.PublicBindingTemplate" .}} -certfile={{.Env.BlockbookInstallPath}}/{{.Coin.Alias}}/cert/blockbook -explorer={{.Blockbook.ExplorerURL}} -log_dir={{.Env.BlockbookInstallPath}}/{{.Coin.Alias}}/logs {{.Blockbook.AdditionalParams}}
+ExecStart={{.Env.BlockbookInstallPath}}/{{.Coin.Alias}}/bin/blockbook -workers=1 -blockchaincfg={{.Env.BlockbookInstallPath}}/{{.Coin.Alias}}/config/blockchaincfg.json -datadir={{.Env.BlockbookDataPath}}/{{.Coin.Alias}}/blockbook/db -sync -internal={{template "Blockbook.InternalBindingTemplate" .}} -public={{template "Blockbook.PublicBindingTemplate" .}} -certfile={{.Env.BlockbookInstallPath}}/{{.Coin.Alias}}/cert/blockbook -explorer={{.Blockbook.ExplorerURL}} -log_dir={{.Env.BlockbookInstallPath}}/{{.Coin.Alias}}/logs {{.Blockbook.AdditionalParams}}
 User={{.Blockbook.SystemUser}}
 Type=simple
 Restart=on-failure
-TimeoutStopSec=300
+TimeoutStopSec=600
 WorkingDirectory={{.Env.BlockbookInstallPath}}/{{.Coin.Alias}}
 
 # Resource limits
 LimitNOFILE=500000
 
+AmbientCapabilities=CAP_NET_BIND_SERVICE
 # Hardening measures
 ####################
 
