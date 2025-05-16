@@ -1,0 +1,41 @@
+name: Sync upstream master & tags
+
+on:
+  schedule:
+    - cron: '0 3 * * *' 
+  workflow_dispatch: 
+
+jobs:
+  sync-upstream:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout your fork's default branch
+        uses: actions/checkout@v4
+        with:
+          ref: master
+          token: ${{ secrets.GH_PAT_PUSH_TOKEN }}
+
+      - name: Set up git user
+        run: |
+          git config user.name "GitHub Actions"
+          git config user.email "actions@github.com"
+
+      - name: Add upstream remote
+        run: git remote add upstream https://github.com/trezor/blockbook.git
+
+      - name: Fetch upstream changes & tags
+        run: |
+          git fetch upstream master --tags
+
+      - name: Merge upstream/master into master
+        run: |
+          git checkout master
+          git merge --ff-only upstream/master
+
+      - name: Push changes to your fork (master & tags)
+        run: |
+          git push origin master
+          git push origin --tags
+        env:
+          GIT_AUTH_TOKEN: ${{ secrets.GH_PAT_PUSH_TOKEN }}
