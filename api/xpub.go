@@ -14,7 +14,7 @@ import (
 	"github.com/trezor/blockbook/db"
 )
 
-const defaultAddressesGap = 20
+const defaultAddressesGap = 100
 const maxAddressesGap = 10000
 
 const txInput = 1
