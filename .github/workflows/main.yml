@@ -27,7 +27,7 @@ jobs:
 
       - name: Fetch upstream changes & tags
         run: |
-          git fetch upstream --tags --prune --unshallow
+          git fetch upstream --tags --prune
 
       - name: Merge upstream/master into master
         run: |
