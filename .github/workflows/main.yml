@@ -31,7 +31,7 @@ jobs:
       - name: Merge upstream/master into master
         run: |
           git checkout master
-          git merge upstream/master
+          git merge --ff-only upstream/master
 
       - name: Push changes to your fork (master & tags)
         run: |
