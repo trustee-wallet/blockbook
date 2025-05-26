@@ -15,7 +15,7 @@
     },
     "ipc": {
         "rpc_url_template": "ws://127.0.0.1:{{.Ports.BackendRPC}}",
-        "rpc_timeout": 25
+        "rpc_timeout": 120
     },
     "backend": {
         "package_name": "backend-ethereum-classic",
@@ -46,7 +46,7 @@
         "additional_params": "",
         "block_chain": {
             "parse": true,
-            "mempool_workers": 8,
+            "mempool_workers": 1,
             "mempool_sub_workers": 2,
             "block_addresses_to_keep": 10000,
             "additional_params": {

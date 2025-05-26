@@ -15,7 +15,7 @@
     "rpc_url_template": "http://127.0.0.1:{{.Ports.BackendRPC}}",
     "rpc_user": "rpc",
     "rpc_pass": "rpc",
-    "rpc_timeout": 25,
+    "rpc_timeout": 120,
     "message_queue_binding_template": "tcp://127.0.0.1:{{.Ports.BackendMessageQueue}}"
   },
   "backend": {
@@ -54,7 +54,7 @@
     "block_chain": {
       "parse": true,
       "subversion": "/Bitcoin SV:1.0.1/",
-      "mempool_workers": 8,
+      "mempool_workers": 1,
       "mempool_sub_workers": 2,
       "block_addresses_to_keep": 300,
       "additional_params": {}

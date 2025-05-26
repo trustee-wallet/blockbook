@@ -7,7 +7,7 @@ After=network.target
 ExecStart={{template "Backend.ExecCommandTemplate" .}}
 User={{.Backend.SystemUser}}
 Restart=on-failure
-TimeoutStopSec=600
+TimeoutStopSec=900
 WorkingDirectory={{.Env.BackendInstallPath}}/{{.Coin.Alias}}
 {{if eq .Backend.ServiceType "forking" -}}
 Type=forking
@@ -20,7 +20,7 @@ Type=simple
 
 # Resource limits
 LimitNOFILE=2000000
-
+# CPUAffinity=X,X
 # Hardening measures
 ####################
 

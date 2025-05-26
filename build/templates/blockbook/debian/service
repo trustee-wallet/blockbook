@@ -9,12 +9,12 @@ ExecStart={{.Env.BlockbookInstallPath}}/{{.Coin.Alias}}/bin/blockbook -workers=1
 User={{.Blockbook.SystemUser}}
 Type=simple
 Restart=on-failure
-TimeoutStopSec=600
+TimeoutStopSec=900
 WorkingDirectory={{.Env.BlockbookInstallPath}}/{{.Coin.Alias}}
 
 # Resource limits
 LimitNOFILE=500000
-
+# CPUAffinity=X,X
 AmbientCapabilities=CAP_NET_BIND_SERVICE
 # Hardening measures
 ####################
