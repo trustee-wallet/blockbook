@@ -1208,31 +1208,37 @@ func (b *EthereumRPC) EthereumTypeGetBalance(addrDesc bchain.AddressDescriptor) 
 
 // EthereumTypeGetNonce returns current balance of an address
 func (b *EthereumRPC) EthereumTypeGetNonce(addrDesc bchain.AddressDescriptor) (uint64, error) {
-
 	var result string
 	var err error
+	var usedAlternative bool
+
+	ethAddress := ethcommon.BytesToAddress(addrDesc)
 
 	if b.alternativeSendTxProvider != nil {
 		result, err = b.alternativeSendTxProvider.callHttpStringResult(
 			b.alternativeSendTxProvider.urls[0],
 			"eth_getTransactionCount",
-			addrDesc,
+			ethAddress,
 			"pending",
 		)
-		if err != nil {
+		if err == nil && result != "" {
+			usedAlternative = true
+		} else {
 			glog.Errorf("Alternative provider failed for eth_getTransactionCount: %v, falling back to primary RPC", err)
 		}
 	}
 
-	if result == "" {
-		result, err = b.callRpcStringResult("eth_getTransactionCount", addrDesc, "pending")
+	if !usedAlternative {
+		result, err = b.callRpcStringResult("eth_getTransactionCount", ethAddress, "pending")
 		if err != nil {
+			glog.Errorf("Primary RPC failed for eth_getTransactionCount: %v", err)
 			return 0, err
 		}
 	}
 
 	nonce, err := hexutil.DecodeUint64(result)
 	if err != nil {
+		glog.Errorf("Failed to parse nonce result '%s': %v", result, err)
 		return 0, err
 	}
 
