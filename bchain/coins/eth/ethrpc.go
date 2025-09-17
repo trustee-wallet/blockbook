@@ -34,6 +34,8 @@ const (
 	TestNetSepolia Network = 11155111
 	// TestNetHolesky is Holesky test network
 	TestNetHolesky Network = 17000
+	// TestNetHoodi is Hoodi test network
+	TestNetHoodi Network = 560048
 )
 
 // Configuration represents json config file
@@ -162,6 +164,9 @@ func (b *EthereumRPC) Initialize() error {
 	case TestNetHolesky:
 		b.Testnet = true
 		b.Network = "holesky"
+	case TestNetHoodi:
+		b.Testnet = true
+		b.Network = "hoodi"
 	default:
 		return errors.Errorf("Unknown network id %v", id)
 	}
@@ -1000,20 +1005,6 @@ func (b *EthereumRPC) EstimateFee(blocks int) (big.Int, error) {
 
 // EstimateSmartFee returns fee estimation
 func (b *EthereumRPC) EstimateSmartFee(blocks int, conservative bool) (big.Int, error) {
-	if b.alternativeSendTxProvider != nil {
-		result, err := b.alternativeSendTxProvider.callHttpStringResult(
-			b.alternativeSendTxProvider.urls[0],
-			"eth_gasPrice",
-		)
-		if err == nil {
-			if strings.HasPrefix(result, "0x") {
-				gasPrice, err := hexutil.DecodeBig(result)
-				if err == nil {
-					return *gasPrice, nil
-				}
-			}
-		}
-	}
 	ctx, cancel := context.WithTimeout(context.Background(), b.Timeout)
 	defer cancel()
 	var r big.Int
