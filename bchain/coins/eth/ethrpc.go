@@ -942,7 +942,7 @@ func (b *EthereumRPC) GetBlock(hash string, height uint32) (*bchain.Block, error
 		blockSpecificData = &bchain.EthereumBlockSpecificData{}
 		if internalErr != nil {
 			blockSpecificData.InternalDataError = internalErr.Error()
-			// glog.Info("InternalDataError ", bbh.Height, ": ", err.Error())
+			// glog.Info("InternalDataError ", bbh.Height, ": ", internalErr.Error())
 		}
 		if len(ens) > 0 {
 			blockSpecificData.AddressAliasRecords = ens
