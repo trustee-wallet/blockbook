@@ -895,14 +895,15 @@ func (b *EthereumRPC) GetBlock(hash string, height uint32) (*bchain.Block, error
 	if err != nil {
 		return nil, err
 	}
-	var head rpcHeader
-	if err := json.Unmarshal(raw, &head); err != nil {
+	var block struct {
+		rpcHeader            // Embed to unmarshal header and txs in one pass.
+		rpcBlockTransactions // Embed to avoid a second JSON decode.
+	}
+	if err := json.Unmarshal(raw, &block); err != nil { // Single decode to reduce CPU overhead.
 		return nil, errors.Annotatef(err, "hash %v, height %v", hash, height)
 	}
-	var body rpcBlockTransactions
-	if err := json.Unmarshal(raw, &body); err != nil {
-		return nil, errors.Annotatef(err, "hash %v, height %v", hash, height)
-	}
+	head := block.rpcHeader
+	body := block.rpcBlockTransactions
 	bbh, err := b.ethHeaderToBlockHeader(&head)
 	if err != nil {
 		return nil, errors.Annotatef(err, "hash %v, height %v", hash, height)
