@@ -366,26 +366,52 @@ func (b *EthereumRPC) EthereumTypeGetErc20ContractBalance(addrDesc, contractDesc
 	return r, nil
 }
 
+type batchCaller interface {
+	BatchCallContext(context.Context, []rpc.BatchElem) error
+}
+
+func (b *EthereumRPC) erc20BatchSize() int {
+	if b.ChainConfig != nil && b.ChainConfig.Erc20BatchSize > 0 {
+		return b.ChainConfig.Erc20BatchSize
+	}
+	return defaultErc20BatchSize
+}
+
 // EthereumTypeGetErc20ContractBalances returns balances of multiple ERC20 contracts for given address.
 // It uses RPC batch calls and returns nil entries for failed/invalid results.
 func (b *EthereumRPC) EthereumTypeGetErc20ContractBalances(addrDesc bchain.AddressDescriptor, contractDescs []bchain.AddressDescriptor) ([]*big.Int, error) {
 	if len(contractDescs) == 0 {
 		return nil, nil
 	}
-	batcher, ok := b.RPC.(interface {
-		BatchCallContext(context.Context, []rpc.BatchElem) error
-	})
+	batcher, ok := b.RPC.(batchCaller)
 	if !ok {
 		// Some RPC clients do not support batching; caller will fall back to single calls.
 		return nil, errors.New("BatchCallContext not supported")
 	}
+	batchSize := b.erc20BatchSize()
 	// Same calldata for all balanceOf calls; only the contract address varies per element.
-	req := erc20BalanceOfCallData(addrDesc)
+	callData := erc20BalanceOfCallData(addrDesc)
+	balances := make([]*big.Int, len(contractDescs))
+	for start := 0; start < len(contractDescs); start += batchSize {
+		end := start + batchSize
+		if end > len(contractDescs) {
+			end = len(contractDescs)
+		}
+		batchBalances, err := b.erc20BalancesBatch(batcher, callData, contractDescs[start:end])
+		if err != nil {
+			return nil, err
+		}
+		copy(balances[start:end], batchBalances)
+	}
+	return balances, nil
+}
+
+func (b *EthereumRPC) erc20BalancesBatch(batcher batchCaller, callData string, contractDescs []bchain.AddressDescriptor) ([]*big.Int, error) {
 	results := make([]string, len(contractDescs))
 	batch := make([]rpc.BatchElem, len(contractDescs))
 	for i, contractDesc := range contractDescs {
 		args := map[string]interface{}{
-			"data": req,
+			"data": callData,
 			"to":   hexutil.Encode(contractDesc),
 		}
 		batch[i] = rpc.BatchElem{

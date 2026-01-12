@@ -3,7 +3,6 @@
 package eth
 
 import (
-	"os"
 	"testing"
 	"time"
 
@@ -13,37 +12,11 @@ import (
 
 const defaultEthRpcURL = "http://naked:8545"
 
-func integrationRpcURL() string {
-	if v := os.Getenv("BLOCKBOOK_ETH_RPC_URL"); v != "" {
-		return v
-	}
-	return defaultEthRpcURL
-}
-
-func TestEthereumTypeGetErc20ContractBalancesIntegration(t *testing.T) {
-	rpcURL := integrationRpcURL()
-	rc, _, err := OpenRPC(rpcURL)
-	if err != nil {
-		t.Skipf("skipping: cannot connect to RPC at %s: %v", rpcURL, err)
-		return
-	}
-	defer rc.Close()
-
-	// Use stable mainnet ERC20 contracts and a well-known EOA.
-	addr := common.HexToAddress("0xd8dA6BF26964aF9D7eEd9e03E53415D37aA96045")
-	contracts := []common.Address{
-		common.HexToAddress("0xA0b86991c6218b36c1d19d4a2e9eb0ce3606eb48"), // USDC
-		common.HexToAddress("0xdAC17F958D2ee523a2206206994597C13D831ec7"), // USDT
-		common.HexToAddress("0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2"), // WETH
-	}
+func verifyBatchBalances(t *testing.T, rpcClient *EthereumRPC, addr common.Address, contracts []common.Address) {
+	t.Helper()
 	contractDescs := make([]bchain.AddressDescriptor, len(contracts))
 	for i, c := range contracts {
 		contractDescs[i] = bchain.AddressDescriptor(c.Bytes())
-	}
-
-	rpcClient := &EthereumRPC{
-		RPC:     rc,
-		Timeout: 15 * time.Second,
 	}
 	addrDesc := bchain.AddressDescriptor(addr.Bytes())
 	balances, err := rpcClient.EthereumTypeGetErc20ContractBalances(addrDesc, contractDescs)
@@ -65,4 +38,41 @@ func TestEthereumTypeGetErc20ContractBalancesIntegration(t *testing.T) {
 			t.Fatalf("balance mismatch for %s: batch=%s single=%s", contracts[i].Hex(), balances[i].String(), single.String())
 		}
 	}
+}
+
+func TestEthereumTypeGetErc20ContractBalancesIntegration(t *testing.T) {
+	rpcURL := defaultEthRpcURL
+	rc, _, err := OpenRPC(rpcURL)
+	if err != nil {
+		t.Skipf("skipping: cannot connect to RPC at %s: %v", rpcURL, err)
+		return
+	}
+	defer rc.Close()
+
+	// Use stable mainnet ERC20 contracts and a well-known EOA.
+	addr := common.HexToAddress("0xd8dA6BF26964aF9D7eEd9e03E53415D37aA96045")
+	baseContracts := []common.Address{
+		common.HexToAddress("0xA0b86991c6218b36c1d19d4a2e9eb0ce3606eb48"), // USDC
+		common.HexToAddress("0xdAC17F958D2ee523a2206206994597C13D831ec7"), // USDT
+		common.HexToAddress("0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2"), // WETH
+	}
+
+	rpcClient := &EthereumRPC{
+		RPC:     rc,
+		Timeout: 15 * time.Second,
+	}
+	verifyBatchBalances(t, rpcClient, addr, baseContracts)
+
+	chunkedContracts := []common.Address{
+		common.HexToAddress("0xA0b86991c6218b36c1d19d4a2e9eb0ce3606eb48"), // USDC
+		common.HexToAddress("0xdAC17F958D2ee523a2206206994597C13D831ec7"), // USDT
+		common.HexToAddress("0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2"), // WETH
+		common.HexToAddress("0x6B175474E89094C44Da98b954EedeAC495271d0F"), // DAI
+	}
+	rpcClientChunked := &EthereumRPC{
+		RPC:         rc,
+		Timeout:     15 * time.Second,
+		ChainConfig: &Configuration{Erc20BatchSize: 2},
+	}
+	verifyBatchBalances(t, rpcClientChunked, addr, chunkedContracts)
 }

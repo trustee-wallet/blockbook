@@ -15,9 +15,10 @@ import (
 )
 
 type mockBatchRPC struct {
-	results   map[string]string
-	perErr    map[string]error
-	lastBatch []rpc.BatchElem
+	results    map[string]string
+	perErr     map[string]error
+	lastBatch  []rpc.BatchElem
+	batchSizes []int
 }
 
 func (m *mockBatchRPC) EthSubscribe(ctx context.Context, channel interface{}, args ...interface{}) (bchain.EVMClientSubscription, error) {
@@ -32,6 +33,7 @@ func (m *mockBatchRPC) Close() {}
 
 func (m *mockBatchRPC) BatchCallContext(ctx context.Context, batch []rpc.BatchElem) error {
 	m.lastBatch = batch
+	m.batchSizes = append(m.batchSizes, len(batch))
 	for i := range batch {
 		elem := &batch[i]
 		if elem.Method != "eth_call" {
@@ -101,6 +103,42 @@ func TestEthereumTypeGetErc20ContractBalances(t *testing.T) {
 	}
 	if balances[1] == nil || balances[1].Sign() != 0 {
 		t.Fatalf("unexpected balance[1]: %v", balances[1])
+	}
+}
+
+func TestEthereumTypeGetErc20ContractBalancesBatchSize(t *testing.T) {
+	addr := common.HexToAddress("0x0000000000000000000000000000000000000011")
+	contractA := common.HexToAddress("0x00000000000000000000000000000000000000aa")
+	contractB := common.HexToAddress("0x00000000000000000000000000000000000000bb")
+	contractC := common.HexToAddress("0x00000000000000000000000000000000000000cc")
+	mock := &mockBatchRPC{
+		results: map[string]string{
+			hexutil.Encode(contractA.Bytes()): fmt.Sprintf("0x%064x", 1),
+			hexutil.Encode(contractB.Bytes()): fmt.Sprintf("0x%064x", 2),
+			hexutil.Encode(contractC.Bytes()): fmt.Sprintf("0x%064x", 3),
+		},
+	}
+	rpcClient := &EthereumRPC{
+		RPC:         mock,
+		Timeout:     time.Second,
+		ChainConfig: &Configuration{Erc20BatchSize: 2},
+	}
+	balances, err := rpcClient.EthereumTypeGetErc20ContractBalances(
+		bchain.AddressDescriptor(addr.Bytes()),
+		[]bchain.AddressDescriptor{
+			bchain.AddressDescriptor(contractA.Bytes()),
+			bchain.AddressDescriptor(contractB.Bytes()),
+			bchain.AddressDescriptor(contractC.Bytes()),
+		},
+	)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(balances) != 3 {
+		t.Fatalf("expected 3 balances, got %d", len(balances))
+	}
+	if len(mock.batchSizes) != 2 || mock.batchSizes[0] != 2 || mock.batchSizes[1] != 1 {
+		t.Fatalf("unexpected batch sizes: %v", mock.batchSizes)
 	}
 }
 

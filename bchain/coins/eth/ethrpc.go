@@ -39,6 +39,8 @@ const (
 	TestNetHoodi Network = 560048
 )
 
+const defaultErc20BatchSize = 200
+
 // Configuration represents json config file
 type Configuration struct {
 	CoinName                        string `json:"coin_name"`
@@ -47,6 +49,7 @@ type Configuration struct {
 	RPCURL                          string `json:"rpc_url"`
 	RPCURLWS                        string `json:"rpc_url_ws"`
 	RPCTimeout                      int    `json:"rpc_timeout"`
+	Erc20BatchSize                  int    `json:"erc20_batch_size,omitempty"`
 	BlockAddressesToKeep            int    `json:"block_addresses_to_keep"`
 	AddressAliases                  bool   `json:"address_aliases,omitempty"`
 	MempoolTxTimeoutHours           int    `json:"mempoolTxTimeoutHours"`
@@ -102,6 +105,10 @@ func NewEthereumRPC(config json.RawMessage, pushHandler func(bchain.Notification
 	if c.BlockAddressesToKeep < 100 {
 		c.BlockAddressesToKeep = 100
 	}
+	if c.Erc20BatchSize <= 0 {
+		c.Erc20BatchSize = defaultErc20BatchSize
+	}
+
 	s := &EthereumRPC{
 		BaseChain:   &bchain.BaseChain{},
 		ChainConfig: &c,
