@@ -7,6 +7,7 @@ import (
 
 	ethcommon "github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/common/hexutil"
+	"github.com/ethereum/go-ethereum/rpc"
 	"github.com/juju/errors"
 	"github.com/trezor/blockbook/bchain"
 )
@@ -293,6 +294,15 @@ func (b *EthereumRPC) EthereumTypeRpcCall(data, to, from string) (string, error)
 	return r, nil
 }
 
+func erc20BalanceOfCallData(addrDesc bchain.AddressDescriptor) string {
+	addr := hexutil.Encode(addrDesc)
+	if len(addr) > 1 {
+		addr = addr[2:]
+	}
+	padded := "0000000000000000000000000000000000000000000000000000000000000000"
+	return contractBalanceOfSignature + padded[len(addr):] + addr
+}
+
 func (b *EthereumRPC) fetchContractInfo(address string) (*bchain.ContractInfo, error) {
 	var contract bchain.ContractInfo
 	data, err := b.EthereumTypeRpcCall(contractNameSignature, address, "")
@@ -343,9 +353,8 @@ func (b *EthereumRPC) GetContractInfo(contractDesc bchain.AddressDescriptor) (*b
 
 // EthereumTypeGetErc20ContractBalance returns balance of ERC20 contract for given address
 func (b *EthereumRPC) EthereumTypeGetErc20ContractBalance(addrDesc, contractDesc bchain.AddressDescriptor) (*big.Int, error) {
-	addr := hexutil.Encode(addrDesc)[2:]
 	contract := hexutil.Encode(contractDesc)
-	req := contractBalanceOfSignature + "0000000000000000000000000000000000000000000000000000000000000000"[len(addr):] + addr
+	req := erc20BalanceOfCallData(addrDesc)
 	data, err := b.EthereumTypeRpcCall(req, contract, "")
 	if err != nil {
 		return nil, err
@@ -355,6 +364,50 @@ func (b *EthereumRPC) EthereumTypeGetErc20ContractBalance(addrDesc, contractDesc
 		return nil, errors.New("Invalid balance")
 	}
 	return r, nil
+}
+
+// EthereumTypeGetErc20ContractBalances returns balances of multiple ERC20 contracts for given address.
+// It uses RPC batch calls and returns nil entries for failed/invalid results.
+func (b *EthereumRPC) EthereumTypeGetErc20ContractBalances(addrDesc bchain.AddressDescriptor, contractDescs []bchain.AddressDescriptor) ([]*big.Int, error) {
+	if len(contractDescs) == 0 {
+		return nil, nil
+	}
+	batcher, ok := b.RPC.(interface {
+		BatchCallContext(context.Context, []rpc.BatchElem) error
+	})
+	if !ok {
+		// Some RPC clients do not support batching; caller will fall back to single calls.
+		return nil, errors.New("BatchCallContext not supported")
+	}
+	// Same calldata for all balanceOf calls; only the contract address varies per element.
+	req := erc20BalanceOfCallData(addrDesc)
+	results := make([]string, len(contractDescs))
+	batch := make([]rpc.BatchElem, len(contractDescs))
+	for i, contractDesc := range contractDescs {
+		args := map[string]interface{}{
+			"data": req,
+			"to":   hexutil.Encode(contractDesc),
+		}
+		batch[i] = rpc.BatchElem{
+			Method: "eth_call",
+			Args:   []interface{}{args, "latest"},
+			Result: &results[i],
+		}
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), b.Timeout)
+	defer cancel()
+	if err := batcher.BatchCallContext(ctx, batch); err != nil {
+		return nil, err
+	}
+	balances := make([]*big.Int, len(contractDescs))
+	for i := range batch {
+		if batch[i].Error != nil {
+			continue
+		}
+		// Leave nil on parse failures so callers can retry per contract if needed.
+		balances[i] = parseSimpleNumericProperty(results[i])
+	}
+	return balances, nil
 }
 
 // GetTokenURI returns URI of non fungible or multi token defined by token id

@@ -348,6 +348,17 @@ func (c *blockChainWithMetrics) EthereumTypeGetErc20ContractBalance(addrDesc, co
 	return c.b.EthereumTypeGetErc20ContractBalance(addrDesc, contractDesc)
 }
 
+func (c *blockChainWithMetrics) EthereumTypeGetErc20ContractBalances(addrDesc bchain.AddressDescriptor, contractDescs []bchain.AddressDescriptor) (v []*big.Int, err error) {
+	defer func(s time.Time) { c.observeRPCLatency("EthereumTypeGetErc20ContractBalances", s, err) }(time.Now())
+	// Keep this optional: not every backend implements batch ERC20 balance calls.
+	if b, ok := c.b.(interface {
+		EthereumTypeGetErc20ContractBalances(bchain.AddressDescriptor, []bchain.AddressDescriptor) ([]*big.Int, error)
+	}); ok {
+		return b.EthereumTypeGetErc20ContractBalances(addrDesc, contractDescs)
+	}
+	return nil, errors.New("EthereumTypeGetErc20ContractBalances not supported")
+}
+
 // GetTokenURI returns URI of non fungible or multi token defined by token id
 func (c *blockChainWithMetrics) GetTokenURI(contractDesc bchain.AddressDescriptor, tokenID *big.Int) (v string, err error) {
 	defer func(s time.Time) { c.observeRPCLatency("GetTokenURI", s, err) }(time.Now())

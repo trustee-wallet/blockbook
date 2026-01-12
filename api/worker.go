@@ -965,7 +965,7 @@ func computePaging(count, page, itemsOnPage int) (Paging, int, int, int) {
 	}, from, to, page
 }
 
-func (w *Worker) getEthereumContractBalance(addrDesc bchain.AddressDescriptor, index int, c *db.AddrContract, details AccountDetails, ticker *common.CurrencyRatesTicker, secondaryCoin string) (*Token, error) {
+func (w *Worker) getEthereumContractBalance(addrDesc bchain.AddressDescriptor, index int, c *db.AddrContract, details AccountDetails, ticker *common.CurrencyRatesTicker, secondaryCoin string, erc20Balance *big.Int) (*Token, error) {
 	standard := bchain.EthereumTokenStandardMap[c.Standard]
 	ci, validContract, err := w.getContractDescriptorInfo(c.Contract, standard)
 	if err != nil {
@@ -985,11 +985,16 @@ func (w *Worker) getEthereumContractBalance(addrDesc bchain.AddressDescriptor, i
 	if details >= AccountDetailsTokenBalances && validContract {
 		if c.Standard == bchain.FungibleToken {
 			// get Erc20 Contract Balance from blockchain, balance obtained from adding and subtracting transfers is not correct
-			b, err := w.chain.EthereumTypeGetErc20ContractBalance(addrDesc, c.Contract)
-			if err != nil {
-				// return nil, nil, nil, errors.Annotatef(err, "EthereumTypeGetErc20ContractBalance %v %v", addrDesc, c.Contract)
-				glog.Warningf("EthereumTypeGetErc20ContractBalance addr %v, contract %v, %v", addrDesc, c.Contract, err)
-			} else {
+			// Prefer pre-fetched batch balance when available to avoid redundant RPC calls.
+			b := erc20Balance
+			if b == nil {
+				b, err = w.chain.EthereumTypeGetErc20ContractBalance(addrDesc, c.Contract)
+				if err != nil {
+					// return nil, nil, nil, errors.Annotatef(err, "EthereumTypeGetErc20ContractBalance %v %v", addrDesc, c.Contract)
+					glog.Warningf("EthereumTypeGetErc20ContractBalance addr %v, contract %v, %v", addrDesc, c.Contract, err)
+				}
+			}
+			if b != nil {
 				t.BalanceSat = (*Amount)(b)
 				if secondaryCoin != "" {
 					baseRate, found := w.GetContractBaseRate(ticker, t.Contract, 0)
@@ -1129,6 +1134,39 @@ func (w *Worker) getEthereumTypeAddressBalances(addrDesc bchain.AddressDescripto
 			return nil, nil, errors.Annotatef(err, "EthereumTypeGetNonce %v", addrDesc)
 		}
 		ticker := w.fiatRates.GetCurrentTicker("", "")
+		var erc20Balances map[string]*big.Int
+		if details >= AccountDetailsTokenBalances && len(ca.Contracts) > 1 {
+			// Batch ERC20 balanceOf calls to cut per-contract RPC; fallback is single-call per contract.
+			erc20Contracts := make([]bchain.AddressDescriptor, 0, len(ca.Contracts))
+			for i := range ca.Contracts {
+				c := &ca.Contracts[i]
+				if c.Standard != bchain.FungibleToken {
+					continue
+				}
+				if len(filterDesc) > 0 && !bytes.Equal(filterDesc, c.Contract) {
+					continue
+				}
+				erc20Contracts = append(erc20Contracts, c.Contract)
+			}
+			if len(erc20Contracts) > 1 {
+				if batcher, ok := w.chain.(interface {
+					EthereumTypeGetErc20ContractBalances(bchain.AddressDescriptor, []bchain.AddressDescriptor) ([]*big.Int, error)
+				}); ok {
+					balances, err := batcher.EthereumTypeGetErc20ContractBalances(addrDesc, erc20Contracts)
+					if err != nil {
+						glog.Warningf("EthereumTypeGetErc20ContractBalances addr %v: %v", addrDesc, err)
+					} else if len(balances) == len(erc20Contracts) {
+						// Keep only successful batch results; missing entries will trigger per-contract calls.
+						erc20Balances = make(map[string]*big.Int, len(erc20Contracts))
+						for i, bal := range balances {
+							if bal != nil {
+								erc20Balances[string(erc20Contracts[i])] = bal
+							}
+						}
+					}
+				}
+			}
+		}
 		if details > AccountDetailsBasic {
 			d.tokens = make([]Token, len(ca.Contracts))
 			var j int
@@ -1141,7 +1179,11 @@ func (w *Worker) getEthereumTypeAddressBalances(addrDesc bchain.AddressDescripto
 					// filter only transactions of this contract
 					filter.Vout = i + db.ContractIndexOffset
 				}
-				t, err := w.getEthereumContractBalance(addrDesc, i+db.ContractIndexOffset, c, details, ticker, secondaryCoin)
+				var erc20Balance *big.Int
+				if erc20Balances != nil {
+					erc20Balance = erc20Balances[string(c.Contract)]
+				}
+				t, err := w.getEthereumContractBalance(addrDesc, i+db.ContractIndexOffset, c, details, ticker, secondaryCoin, erc20Balance)
 				if err != nil {
 					return nil, nil, err
 				}
