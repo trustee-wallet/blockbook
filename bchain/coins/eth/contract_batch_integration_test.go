@@ -9,12 +9,10 @@ import (
 	"github.com/trezor/blockbook/bchain/coins"
 )
 
-const defaultEthRpcURL = "http://localhost:8545"
-
 func TestEthereumTypeGetErc20ContractBalancesIntegration(t *testing.T) {
 	coins.RunERC20BatchBalanceTest(t, coins.ERC20BatchCase{
 		Name:   "ethereum",
-		RPCURL: defaultEthRpcURL,
+		RPCURL: coins.RPCURLFromConfig(t, "ethereum"),
 		// Token-rich EOA (CEX hot wallet) used as a stable address reference.
 		Addr: common.HexToAddress("0x28C6c06298d514Db089934071355E5743bf21d60"),
 		Contracts: []common.Address{

@@ -3,10 +3,14 @@
 package coins
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
 	"net"
+	"os"
+	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -14,6 +18,7 @@ import (
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/trezor/blockbook/bchain"
 	"github.com/trezor/blockbook/bchain/coins/eth"
+	buildcfg "github.com/trezor/blockbook/build/tools"
 )
 
 const defaultBatchSize = 200
@@ -53,6 +58,50 @@ func RunERC20BatchBalanceTest(t *testing.T, tc ERC20BatchCase) {
 		handleRPCError(t, tc, err)
 		return
 	}
+}
+
+func RPCURLFromConfig(t *testing.T, coinAlias string) string {
+	t.Helper()
+	configsDir, err := repoConfigsDir()
+	if err != nil {
+		t.Fatalf("integration config path error: %v", err)
+	}
+	cfg, err := buildcfg.LoadConfig(configsDir, coinAlias)
+	if err != nil {
+		t.Fatalf("load config for %s: %v", coinAlias, err)
+	}
+	templ := cfg.ParseTemplate()
+	var out bytes.Buffer
+	if err := templ.ExecuteTemplate(&out, "IPC.RPCURLTemplate", cfg); err != nil {
+		t.Fatalf("render rpc_url_template for %s: %v", coinAlias, err)
+	}
+	rpcURL := strings.TrimSpace(out.String())
+	if rpcURL == "" {
+		t.Fatalf("empty rpc url from config for %s", coinAlias)
+	}
+	return rpcURL
+}
+
+func repoConfigsDir() (string, error) {
+	_, file, _, ok := runtime.Caller(0)
+	if !ok {
+		return "", errors.New("unable to resolve caller path")
+	}
+	dir := filepath.Dir(file)
+	for i := 0; i < 6; i++ {
+		configsDir := filepath.Join(dir, "configs")
+		if _, err := os.Stat(filepath.Join(configsDir, "coins")); err == nil {
+			return configsDir, nil
+		} else if !os.IsNotExist(err) {
+			return "", err
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			break
+		}
+		dir = parent
+	}
+	return "", errors.New("configs/coins not found from caller path")
 }
 
 func handleRPCError(t *testing.T, tc ERC20BatchCase, err error) {

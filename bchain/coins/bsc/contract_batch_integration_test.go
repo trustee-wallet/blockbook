@@ -9,12 +9,10 @@ import (
 	"github.com/trezor/blockbook/bchain/coins"
 )
 
-const defaultBscRpcURL = "ws://localhost:8064"
-
 func TestBNBSmartChainErc20ContractBalancesIntegration(t *testing.T) {
 	coins.RunERC20BatchBalanceTest(t, coins.ERC20BatchCase{
 		Name:   "bsc",
-		RPCURL: defaultBscRpcURL,
+		RPCURL: coins.RPCURLFromConfig(t, "bsc"),
 		Addr:   common.HexToAddress("0x21d45650db732cE5dF77685d6021d7D5d1da807f"),
 		Contracts: []common.Address{
 			common.HexToAddress("0xBB4CdB9CBd36B01bD1cBaEBF2De08d9173bc095c"), // WBNB

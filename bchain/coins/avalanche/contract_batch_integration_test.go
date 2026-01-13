@@ -9,12 +9,10 @@ import (
 	"github.com/trezor/blockbook/bchain/coins"
 )
 
-const defaultAvaxRpcURL = "http://localhost:8098/ext/bc/C/rpc"
-
 func TestAvalancheErc20ContractBalancesIntegration(t *testing.T) {
 	coins.RunERC20BatchBalanceTest(t, coins.ERC20BatchCase{
 		Name:   "avalanche",
-		RPCURL: defaultAvaxRpcURL,
+		RPCURL: coins.RPCURLFromConfig(t, "avalanche"),
 		// Token-rich address on Avalanche C-Chain (balanceOf works for any address).
 		Addr: common.HexToAddress("0x60aE616a2155Ee3d9A68541Ba4544862310933d4"),
 		Contracts: []common.Address{

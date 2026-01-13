@@ -9,12 +9,10 @@ import (
 	"github.com/trezor/blockbook/bchain/coins"
 )
 
-const defaultOptimismRpcURL = "ws://localhost:8200"
-
 func TestOptimismErc20ContractBalancesIntegration(t *testing.T) {
 	coins.RunERC20BatchBalanceTest(t, coins.ERC20BatchCase{
 		Name:   "optimism",
-		RPCURL: defaultOptimismRpcURL,
+		RPCURL: coins.RPCURLFromConfig(t, "optimism"),
 		Addr:   common.HexToAddress("0xDF90C9B995a3b10A5b8570a47101e6c6a29eb945"),
 		Contracts: []common.Address{
 			common.HexToAddress("0x4200000000000000000000000000000000000006"), // WETH
