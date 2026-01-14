@@ -6,13 +6,14 @@ import (
 	"testing"
 
 	"github.com/ethereum/go-ethereum/common"
-	"github.com/trezor/blockbook/bchain/coins"
+	"github.com/trezor/blockbook/bchain"
+	"github.com/trezor/blockbook/bchain/coins/eth"
 )
 
 func TestEthereumTypeGetErc20ContractBalancesIntegration(t *testing.T) {
-	coins.RunERC20BatchBalanceTest(t, coins.ERC20BatchCase{
+	bchain.RunERC20BatchBalanceTest(t, bchain.ERC20BatchCase{
 		Name:   "ethereum",
-		RPCURL: coins.RPCURLFromConfig(t, "ethereum"),
+		RPCURL: bchain.RPCURLFromConfig(t, "ethereum"),
 		// Token-rich EOA (CEX hot wallet) used as a stable address reference.
 		Addr: common.HexToAddress("0x28C6c06298d514Db089934071355E5743bf21d60"),
 		Contracts: []common.Address{
@@ -23,5 +24,6 @@ func TestEthereumTypeGetErc20ContractBalancesIntegration(t *testing.T) {
 		},
 		BatchSize:       200,
 		SkipUnavailable: false,
+		NewClient:       eth.NewERC20BatchIntegrationClient,
 	})
 }

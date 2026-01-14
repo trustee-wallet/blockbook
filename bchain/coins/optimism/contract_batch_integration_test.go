@@ -6,13 +6,14 @@ import (
 	"testing"
 
 	"github.com/ethereum/go-ethereum/common"
-	"github.com/trezor/blockbook/bchain/coins"
+	"github.com/trezor/blockbook/bchain"
+	"github.com/trezor/blockbook/bchain/coins/eth"
 )
 
 func TestOptimismErc20ContractBalancesIntegration(t *testing.T) {
-	coins.RunERC20BatchBalanceTest(t, coins.ERC20BatchCase{
+	bchain.RunERC20BatchBalanceTest(t, bchain.ERC20BatchCase{
 		Name:   "optimism",
-		RPCURL: coins.RPCURLFromConfig(t, "optimism"),
+		RPCURL: bchain.RPCURLFromConfig(t, "optimism"),
 		Addr:   common.HexToAddress("0xDF90C9B995a3b10A5b8570a47101e6c6a29eb945"),
 		Contracts: []common.Address{
 			common.HexToAddress("0x4200000000000000000000000000000000000006"), // WETH
@@ -23,5 +24,6 @@ func TestOptimismErc20ContractBalancesIntegration(t *testing.T) {
 		},
 		BatchSize:       200,
 		SkipUnavailable: true,
+		NewClient:       eth.NewERC20BatchIntegrationClient,
 	})
 }

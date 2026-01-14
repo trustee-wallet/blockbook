@@ -6,13 +6,14 @@ import (
 	"testing"
 
 	"github.com/ethereum/go-ethereum/common"
-	"github.com/trezor/blockbook/bchain/coins"
+	"github.com/trezor/blockbook/bchain"
+	"github.com/trezor/blockbook/bchain/coins/eth"
 )
 
 func TestAvalancheErc20ContractBalancesIntegration(t *testing.T) {
-	coins.RunERC20BatchBalanceTest(t, coins.ERC20BatchCase{
+	bchain.RunERC20BatchBalanceTest(t, bchain.ERC20BatchCase{
 		Name:   "avalanche",
-		RPCURL: coins.RPCURLFromConfig(t, "avalanche"),
+		RPCURL: bchain.RPCURLFromConfig(t, "avalanche"),
 		// Token-rich address on Avalanche C-Chain (balanceOf works for any address).
 		Addr: common.HexToAddress("0x60aE616a2155Ee3d9A68541Ba4544862310933d4"),
 		Contracts: []common.Address{
@@ -25,5 +26,6 @@ func TestAvalancheErc20ContractBalancesIntegration(t *testing.T) {
 		},
 		BatchSize:       200,
 		SkipUnavailable: true,
+		NewClient:       eth.NewERC20BatchIntegrationClient,
 	})
 }
