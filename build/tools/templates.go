@@ -100,6 +100,8 @@ type Config struct {
 		BlockbookInstallPath string `json:"blockbook_install_path"`
 		BlockbookDataPath    string `json:"blockbook_data_path"`
 		Architecture         string `json:"architecture"`
+		RPCBindHost          string `json:"-"` // Derived from BB_RPC_BIND_HOST_* to keep default RPC exposure local.
+		RPCAllowIP           string `json:"-"` // Derived to align rpcallowip with RPC bind host intent.
 	} `json:"-"`
 }
 
@@ -185,6 +187,23 @@ func LoadConfig(configsDir, coin string) (*Config, error) {
 
 	config.Meta.BuildDatetime = time.Now().Format("Mon, 02 Jan 2006 15:04:05 -0700")
 	config.Env.Architecture = runtime.GOARCH
+
+	rpcBindKey := "BB_RPC_BIND_HOST_" + config.Coin.Alias // Bind host is per coin alias to match deployment naming.
+	config.Env.RPCBindHost = "127.0.0.1"                  // Default to localhost to avoid unintended remote exposure.
+	if bindHost, ok := os.LookupEnv(rpcBindKey); ok && bindHost != "" {
+		config.Env.RPCBindHost = bindHost
+	}
+	rpcAllowKey := "BB_RPC_ALLOW_IP_" + config.Coin.Alias // Allow list defaults to loopback unless explicitly overridden.
+	config.Env.RPCAllowIP = "127.0.0.1"
+	if allowIP, ok := os.LookupEnv(rpcAllowKey); ok && allowIP != "" {
+		config.Env.RPCAllowIP = allowIP
+	}
+
+	rpcURLKey := "BB_RPC_URL_" + config.Coin.Alias // Use alias so env naming matches coin config and deployment conventions.
+	if rpcURL, ok := os.LookupEnv(rpcURLKey); ok && rpcURL != "" {
+		// Prefer explicit env override so package generation/tests can target hosted RPC endpoints without editing JSON.
+		config.IPC.RPCURLTemplate = rpcURL
+	}
 
 	if !isEmpty(config, "backend") {
 		// set platform specific fields to config
