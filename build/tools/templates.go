@@ -10,6 +10,8 @@ import (
 	"path/filepath"
 	"reflect"
 	"runtime"
+	"sort"
+	"strings"
 	"text/template"
 	"time"
 )
@@ -124,6 +126,71 @@ func generateRPCAuth(user, pass string) (string, error) {
 	return out.String(), nil
 }
 
+func validateRPCEnvVars(configsDir string) error {
+	// Use config filenames as the source of truth so typos fail before templating.
+	validAliases, err := loadCoinAliases(configsDir)
+	if err != nil {
+		return err
+	}
+	unknown := collectUnknownRPCEnvVars(validAliases, rpcEnvPrefixes())
+	if len(unknown) == 0 {
+		return nil
+	}
+	sort.Strings(unknown)
+	return fmt.Errorf("BB_RPC_* env vars reference unknown coin aliases: %s", strings.Join(unknown, ", "))
+}
+
+func loadCoinAliases(configsDir string) (map[string]struct{}, error) {
+	coinsDir := filepath.Join(configsDir, "coins")
+	entries, err := os.ReadDir(coinsDir)
+	if err != nil {
+		return nil, fmt.Errorf("read coins directory for BB_RPC_* validation: %w", err)
+	}
+
+	validAliases := make(map[string]struct{}, len(entries))
+	for _, entry := range entries {
+		if entry.IsDir() {
+			continue
+		}
+		name := entry.Name()
+		if !strings.HasSuffix(name, ".json") {
+			continue
+		}
+		alias := strings.TrimSuffix(name, ".json")
+		if alias != "" {
+			validAliases[alias] = struct{}{}
+		}
+	}
+
+	return validAliases, nil
+}
+
+func rpcEnvPrefixes() []string {
+	return []string{"BB_RPC_URL_", "BB_RPC_BIND_HOST_", "BB_RPC_ALLOW_IP_"}
+}
+
+func collectUnknownRPCEnvVars(validAliases map[string]struct{}, prefixes []string) []string {
+	var unknown []string
+	for _, env := range os.Environ() {
+		key, _, _ := strings.Cut(env, "=")
+		for _, prefix := range prefixes {
+			if !strings.HasPrefix(key, prefix) {
+				continue
+			}
+			alias := strings.TrimPrefix(key, prefix)
+			if alias == "" {
+				unknown = append(unknown, fmt.Sprintf("(empty alias from %s)", key)) // Empty suffix is always invalid.
+				break
+			}
+			if _, ok := validAliases[alias]; !ok {
+				unknown = append(unknown, fmt.Sprintf("%s (from %s)", alias, key))
+			}
+			break
+		}
+	}
+	return unknown
+}
+
 // ParseTemplate parses the template
 func (c *Config) ParseTemplate() *template.Template {
 	templates := map[string]string{
@@ -164,6 +231,11 @@ func copyNonZeroBackendFields(toValue *Backend, fromValue *Backend) {
 // LoadConfig loads the config files
 func LoadConfig(configsDir, coin string) (*Config, error) {
 	config := new(Config)
+
+	// Fail fast if BB_RPC_* variables reference coins that do not exist in configs/coins.
+	if err := validateRPCEnvVars(configsDir); err != nil {
+		return nil, err
+	}
 
 	f, err := os.Open(filepath.Join(configsDir, "coins", coin+".json"))
 	if err != nil {
