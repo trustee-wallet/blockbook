@@ -13,7 +13,7 @@ import (
 func TestOptimismErc20ContractBalancesIntegration(t *testing.T) {
 	bchain.RunERC20BatchBalanceTest(t, bchain.ERC20BatchCase{
 		Name:   "optimism",
-		RPCURL: bchain.RPCURLFromConfig(t, "optimism"),
+		RPCURL: bchain.LoadBlockchainCfg(t, "optimism").RpcUrl,
 		Addr:   common.HexToAddress("0xDF90C9B995a3b10A5b8570a47101e6c6a29eb945"),
 		Contracts: []common.Address{
 			common.HexToAddress("0x4200000000000000000000000000000000000006"), // WETH

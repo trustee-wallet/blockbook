@@ -13,7 +13,7 @@ import (
 func TestBaseErc20ContractBalancesIntegration(t *testing.T) {
 	bchain.RunERC20BatchBalanceTest(t, bchain.ERC20BatchCase{
 		Name:   "base",
-		RPCURL: bchain.RPCURLFromConfig(t, "base"),
+		RPCURL: bchain.LoadBlockchainCfg(t, "base").RpcUrl,
 		Addr:   common.HexToAddress("0x242E2d70d3AdC00a9eF23CeD6E88811fCefCA788"),
 		Contracts: []common.Address{
 			common.HexToAddress("0x4200000000000000000000000000000000000006"), // WETH

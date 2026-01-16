@@ -13,7 +13,7 @@ import (
 func TestEthereumTypeGetErc20ContractBalancesIntegration(t *testing.T) {
 	bchain.RunERC20BatchBalanceTest(t, bchain.ERC20BatchCase{
 		Name:   "ethereum",
-		RPCURL: bchain.RPCURLFromConfig(t, "ethereum"),
+		RPCURL: bchain.LoadBlockchainCfg(t, "ethereum").RpcUrl,
 		// Token-rich EOA (CEX hot wallet) used as a stable address reference.
 		Addr: common.HexToAddress("0x28C6c06298d514Db089934071355E5743bf21d60"),
 		Contracts: []common.Address{
