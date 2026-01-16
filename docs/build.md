@@ -222,7 +222,7 @@ sudo apt-get update && sudo apt-get install -y \
 git clone https://github.com/facebook/rocksdb.git
 cd rocksdb
 git checkout v9.10.0
-CFLAGS=-fPIC CXXFLAGS=-fPIC make release
+CFLAGS=-fPIC CXXFLAGS="-fPIC -Wno-error=array-bounds" make release
 ```
 
 Setup variables for grocksdb
