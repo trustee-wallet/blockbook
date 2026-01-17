@@ -80,7 +80,9 @@ func NewCoinGeckoDownloader(db *db.RocksDB, network string, url string, coin str
 			freeURL = "https://api.coingecko.com/api/v3"
 		)
 
-		if apiKey != "" && (plan == "pro" || plan == "") {
+		plan = strings.ToLower(strings.TrimSpace(plan))
+
+		if apiKey != "" && plan != "free" {
 			url = proURL
 		} else {
 			url = freeURL
@@ -103,6 +105,7 @@ func NewCoinGeckoDownloader(db *db.RocksDB, network string, url string, coin str
 		db:              db,
 		throttlingDelay: time.Duration(throttlingDelayMs) * time.Millisecond,
 		metrics:         metrics,
+		plan:            plan,
 	}
 }
 
