@@ -8,6 +8,7 @@ import (
 	ethcommon "github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/common/hexutil"
 	"github.com/ethereum/go-ethereum/rpc"
+	"github.com/golang/glog"
 	"github.com/juju/errors"
 	"github.com/trezor/blockbook/bchain"
 )
@@ -428,10 +429,24 @@ func (b *EthereumRPC) erc20BalancesBatch(batcher batchCaller, callData string, c
 	balances := make([]*big.Int, len(contractDescs))
 	for i := range batch {
 		if batch[i].Error != nil {
+			glog.Warningf("erc20 batch eth_call failed for %s: %v", hexutil.Encode(contractDescs[i]), batch[i].Error)
+			// In case of batch failure, retry missing/failed elements as single calls.
+			data, err := b.EthereumTypeRpcCall(callData, hexutil.Encode(contractDescs[i]), "")
+			if err != nil {
+				glog.Warningf("erc20 single eth_call fallback failed for %s: %v", hexutil.Encode(contractDescs[i]), err)
+				continue
+			}
+			balances[i] = parseSimpleNumericProperty(data)
+			if balances[i] == nil {
+				glog.Warningf("erc20 single eth_call invalid result for %s: %q", hexutil.Encode(contractDescs[i]), data)
+			}
 			continue
 		}
 		// Leave nil on parse failures so callers can retry per contract if needed.
 		balances[i] = parseSimpleNumericProperty(results[i])
+		if balances[i] == nil {
+			glog.Warningf("erc20 batch eth_call invalid result for %s: %q", hexutil.Encode(contractDescs[i]), results[i])
+		}
 	}
 	return balances, nil
 }
