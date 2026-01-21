@@ -59,6 +59,11 @@ func (c *AvalancheDualRPCClient) CallContext(ctx context.Context, result interfa
 	return c.CallClient.CallContext(ctx, result, method, args...)
 }
 
+// BatchCallContext forwards batch JSON-RPC calls to the HTTP client.
+func (c *AvalancheDualRPCClient) BatchCallContext(ctx context.Context, batch []rpc.BatchElem) error {
+	return c.CallClient.BatchCallContext(ctx, batch)
+}
+
 // EthSubscribe forwards subscriptions to the WebSocket client.
 func (c *AvalancheDualRPCClient) EthSubscribe(ctx context.Context, channel interface{}, args ...interface{}) (bchain.EVMClientSubscription, error) {
 	return c.SubClient.EthSubscribe(ctx, channel, args...)

@@ -10,15 +10,15 @@ import (
 
 // NewERC20BatchIntegrationClient builds an ERC20-capable RPC client for integration tests.
 // EVM chains share ERC20 balanceOf semantics (eth_call) and coin wrappers embed EthereumRPC.
-func NewERC20BatchIntegrationClient(rpcURL string, batchSize int) (bchain.ERC20BatchClient, func(), error) {
-	rc, _, err := OpenRPC(rpcURL)
+func NewERC20BatchIntegrationClient(rpcURL, rpcURLWS string, batchSize int) (bchain.ERC20BatchClient, func(), error) {
+	rc, _, err := OpenRPC(rpcURL, rpcURLWS)
 	if err != nil {
 		return nil, nil, err
 	}
 	client := &EthereumRPC{
 		RPC:         rc,
 		Timeout:     15 * time.Second,
-		ChainConfig: &Configuration{Erc20BatchSize: batchSize},
+		ChainConfig: &Configuration{RPCURL: rpcURL, RPCURLWS: rpcURLWS, Erc20BatchSize: batchSize},
 	}
 	return client, func() { rc.Close() }, nil
 }

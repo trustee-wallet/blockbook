@@ -11,9 +11,11 @@ import (
 )
 
 func TestAvalancheErc20ContractBalancesIntegration(t *testing.T) {
+	cfg := bchain.LoadBlockchainCfg(t, "avalanche")
 	bchain.RunERC20BatchBalanceTest(t, bchain.ERC20BatchCase{
-		Name:   "avalanche",
-		RPCURL: bchain.LoadBlockchainCfg(t, "avalanche").RpcUrl,
+		Name:     "avalanche",
+		RPCURL:   cfg.RpcUrl,
+		RPCURLWS: cfg.RpcUrlWs,
 		// Token-rich address on Avalanche C-Chain (balanceOf works for any address).
 		Addr: common.HexToAddress("0x60aE616a2155Ee3d9A68541Ba4544862310933d4"),
 		Contracts: []common.Address{

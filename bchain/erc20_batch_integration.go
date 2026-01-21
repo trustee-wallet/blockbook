@@ -14,11 +14,12 @@ import (
 	"github.com/ethereum/go-ethereum/common"
 )
 
-const defaultBatchSize = 200
+const defaultBatchSize = 100
 
 type ERC20BatchCase struct {
 	Name            string
 	RPCURL          string
+	RPCURLWS        string
 	Addr            common.Address
 	Contracts       []common.Address
 	BatchSize       int
@@ -35,7 +36,7 @@ func RunERC20BatchBalanceTest(t *testing.T, tc ERC20BatchCase) {
 	if tc.NewClient == nil {
 		t.Fatalf("NewClient is required for ERC20 batch integration test")
 	}
-	rpcClient, closeFn, err := tc.NewClient(tc.RPCURL, tc.BatchSize)
+	rpcClient, closeFn, err := tc.NewClient(tc.RPCURL, tc.RPCURLWS, tc.BatchSize)
 	if err != nil {
 		handleRPCError(t, tc, fmt.Errorf("rpc dial error: %w", err))
 		return
@@ -82,7 +83,7 @@ type ERC20BatchClient interface {
 	EthereumTypeGetErc20ContractBalance(addrDesc, contractDesc AddressDescriptor) (*big.Int, error)
 }
 
-type ERC20BatchClientFactory func(rpcURL string, batchSize int) (ERC20BatchClient, func(), error)
+type ERC20BatchClientFactory func(rpcURL, rpcURLWS string, batchSize int) (ERC20BatchClient, func(), error)
 
 func verifyBatchBalances(rpcClient ERC20BatchClient, addr common.Address, contracts []common.Address) error {
 	if len(contracts) == 0 {

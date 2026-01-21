@@ -11,10 +11,12 @@ import (
 )
 
 func TestBNBSmartChainErc20ContractBalancesIntegration(t *testing.T) {
+	cfg := bchain.LoadBlockchainCfg(t, "bsc")
 	bchain.RunERC20BatchBalanceTest(t, bchain.ERC20BatchCase{
-		Name:   "bsc",
-		RPCURL: bchain.LoadBlockchainCfg(t, "bsc").RpcUrl,
-		Addr:   common.HexToAddress("0x21d45650db732cE5dF77685d6021d7D5d1da807f"),
+		Name:     "bsc",
+		RPCURL:   cfg.RpcUrl,
+		RPCURLWS: cfg.RpcUrlWs,
+		Addr:     common.HexToAddress("0x21d45650db732cE5dF77685d6021d7D5d1da807f"),
 		Contracts: []common.Address{
 			common.HexToAddress("0xBB4CdB9CBd36B01bD1cBaEBF2De08d9173bc095c"), // WBNB
 			common.HexToAddress("0x55d398326f99059fF775485246999027B3197955"), // USDT

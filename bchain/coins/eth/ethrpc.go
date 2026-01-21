@@ -39,7 +39,7 @@ const (
 	TestNetHoodi Network = 560048
 )
 
-const defaultErc20BatchSize = 200
+const defaultErc20BatchSize = 100
 
 // Configuration represents json config file
 type Configuration struct {
