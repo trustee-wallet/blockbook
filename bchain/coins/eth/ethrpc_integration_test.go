@@ -15,10 +15,12 @@ const (
 
 func newTestEthereumRPC(t *testing.T) *EthereumRPC {
 	t.Helper()
-	rpcURL := bchain.LoadBlockchainCfg(t, "ethereum").RpcUrl
-	rc, ec, err := OpenRPC(rpcURL)
+	cfg := bchain.LoadBlockchainCfg(t, "ethereum")
+	rpcURL := cfg.RpcUrl
+	rpcURLWS := cfg.RpcUrlWs
+	rc, ec, err := OpenRPC(rpcURL, rpcURLWS)
 	if err != nil {
-		t.Skipf("skipping: cannot connect to RPC at %s: %v", rpcURL, err)
+		t.Skipf("skipping: cannot connect to RPC at %s/%s: %v", rpcURL, rpcURLWS, err)
 		return nil
 	}
 	t.Cleanup(func() { rc.Close() })
@@ -29,7 +31,7 @@ func newTestEthereumRPC(t *testing.T) *EthereumRPC {
 		RPC:         rc,
 		Timeout:     30 * time.Second,
 		Parser:      NewEthereumParser(100, false),
-		ChainConfig: &Configuration{},
+		ChainConfig: &Configuration{RPCURL: rpcURL, RPCURLWS: rpcURLWS},
 	}
 }
 
