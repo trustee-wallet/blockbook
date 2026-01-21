@@ -259,6 +259,7 @@
         "evm_connectivity": true
     },
     "ethereum": {
+        "rpc": ["GetBlock", "GetBlockHash", "GetTransaction", "EstimateFee", "GetBlockHeader"],
         "evm_connectivity": true
     },
     "optimism": {
