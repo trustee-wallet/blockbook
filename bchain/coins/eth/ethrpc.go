@@ -7,6 +7,7 @@ import (
 	"io"
 	"math/big"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 	"sync"
@@ -44,6 +45,7 @@ type Configuration struct {
 	CoinShortcut                    string `json:"coin_shortcut"`
 	Network                         string `json:"network"`
 	RPCURL                          string `json:"rpc_url"`
+	RPCURLWS                        string `json:"rpc_url_ws"`
 	RPCTimeout                      int    `json:"rpc_timeout"`
 	BlockAddressesToKeep            int    `json:"block_addresses_to_keep"`
 	AddressAliases                  bool   `json:"address_aliases,omitempty"`
@@ -67,7 +69,7 @@ type EthereumRPC struct {
 	Timeout                   time.Duration
 	Parser                    *EthereumParser
 	PushHandler               func(bchain.NotificationType)
-	OpenRPC                   func(string) (bchain.EVMRPCClient, bchain.EVMClient, error)
+	OpenRPC                   func(string, string) (bchain.EVMRPCClient, bchain.EVMClient, error)
 	Mempool                   *bchain.MempoolEthereumType
 	mempoolInitialized        bool
 	bestHeaderLock            sync.Mutex
@@ -100,7 +102,6 @@ func NewEthereumRPC(config json.RawMessage, pushHandler func(bchain.Notification
 	if c.BlockAddressesToKeep < 100 {
 		c.BlockAddressesToKeep = 100
 	}
-
 	s := &EthereumRPC{
 		BaseChain:   &bchain.BaseChain{},
 		ChainConfig: &c,
@@ -116,16 +117,107 @@ func NewEthereumRPC(config json.RawMessage, pushHandler func(bchain.Notification
 	return s, nil
 }
 
-// OpenRPC opens RPC connection to ETH backend
-var OpenRPC = func(url string) (bchain.EVMRPCClient, bchain.EVMClient, error) {
+// EnsureSameRPCHost validates that both RPC URLs point to the same host.
+func EnsureSameRPCHost(httpURL, wsURL string) error {
+	if httpURL == "" || wsURL == "" {
+		return nil
+	}
+	httpHost, err := rpcURLHost(httpURL)
+	if err != nil {
+		return errors.Annotatef(err, "rpc_url")
+	}
+	wsHost, err := rpcURLHost(wsURL)
+	if err != nil {
+		return errors.Annotatef(err, "rpc_url_ws")
+	}
+	if !strings.EqualFold(httpHost, wsHost) {
+		return errors.Errorf("rpc_url host %q and rpc_url_ws host %q must match", httpHost, wsHost)
+	}
+	return nil
+}
+
+// NormalizeRPCURLs validates HTTP and WS RPC endpoints and enforces same-host rules.
+func NormalizeRPCURLs(httpURL, wsURL string) (string, string, error) {
+	callURL := strings.TrimSpace(httpURL)
+	subURL := strings.TrimSpace(wsURL)
+	if callURL == "" {
+		return "", "", errors.New("rpc_url is empty")
+	}
+	if subURL == "" {
+		return "", "", errors.New("rpc_url_ws is empty")
+	}
+	if err := validateRPCURLScheme(callURL, "rpc_url", []string{"http", "https"}); err != nil {
+		return "", "", err
+	}
+	if err := validateRPCURLScheme(subURL, "rpc_url_ws", []string{"ws", "wss"}); err != nil {
+		return "", "", err
+	}
+	if err := EnsureSameRPCHost(callURL, subURL); err != nil {
+		return "", "", err
+	}
+	return callURL, subURL, nil
+}
+
+func validateRPCURLScheme(rawURL, field string, allowedSchemes []string) error {
+	parsed, err := url.Parse(rawURL)
+	if err != nil {
+		return errors.Annotatef(err, "%s", field)
+	}
+	scheme := strings.ToLower(parsed.Scheme)
+	if scheme == "" {
+		return errors.Errorf("%s missing scheme in %q", field, rawURL)
+	}
+	for _, allowed := range allowedSchemes {
+		if scheme == allowed {
+			return nil
+		}
+	}
+	return errors.Errorf("%s must use %s scheme: %q", field, strings.Join(allowedSchemes, " or "), rawURL)
+}
+
+func rpcURLHost(rawURL string) (string, error) {
+	parsed, err := url.Parse(rawURL)
+	if err != nil {
+		return "", err
+	}
+	host := parsed.Hostname()
+	if host == "" {
+		return "", errors.Errorf("missing host in %q", rawURL)
+	}
+	return host, nil
+}
+
+func dialRPC(rawURL string) (*rpc.Client, error) {
+	if rawURL == "" {
+		return nil, errors.New("empty rpc url")
+	}
 	opts := []rpc.ClientOption{}
-	opts = append(opts, rpc.WithWebsocketMessageSizeLimit(0))
-	r, err := rpc.DialOptions(context.Background(), url, opts...)
+	if strings.HasPrefix(rawURL, "ws://") || strings.HasPrefix(rawURL, "wss://") {
+		opts = append(opts, rpc.WithWebsocketMessageSizeLimit(0))
+	}
+	return rpc.DialOptions(context.Background(), rawURL, opts...)
+}
+
+// OpenRPC opens RPC connection to ETH backend.
+var OpenRPC = func(httpURL, wsURL string) (bchain.EVMRPCClient, bchain.EVMClient, error) {
+	callURL, subURL, err := NormalizeRPCURLs(httpURL, wsURL)
 	if err != nil {
 		return nil, nil, err
 	}
-	rc := &EthereumRPCClient{Client: r}
-	ec := &EthereumClient{Client: ethclient.NewClient(r)}
+	callClient, err := dialRPC(callURL)
+	if err != nil {
+		return nil, nil, err
+	}
+	subClient := callClient
+	if subURL != callURL {
+		subClient, err = dialRPC(subURL)
+		if err != nil {
+			callClient.Close()
+			return nil, nil, err
+		}
+	}
+	rc := &DualRPCClient{CallClient: callClient, SubClient: subClient}
+	ec := &EthereumClient{Client: ethclient.NewClient(callClient)}
 	return rc, ec, nil
 }
 
@@ -133,7 +225,7 @@ var OpenRPC = func(url string) (bchain.EVMRPCClient, bchain.EVMClient, error) {
 func (b *EthereumRPC) Initialize() error {
 	b.OpenRPC = OpenRPC
 
-	rc, ec, err := b.OpenRPC(b.ChainConfig.RPCURL)
+	rc, ec, err := b.OpenRPC(b.ChainConfig.RPCURL, b.ChainConfig.RPCURLWS)
 	if err != nil {
 		return err
 	}
@@ -389,7 +481,7 @@ func (b *EthereumRPC) closeRPC() {
 func (b *EthereumRPC) reconnectRPC() error {
 	glog.Info("Reconnecting RPC")
 	b.closeRPC()
-	rc, ec, err := b.OpenRPC(b.ChainConfig.RPCURL)
+	rc, ec, err := b.OpenRPC(b.ChainConfig.RPCURL, b.ChainConfig.RPCURLWS)
 	if err != nil {
 		return err
 	}

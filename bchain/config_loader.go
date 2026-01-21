@@ -17,7 +17,8 @@ import (
 // BlockchainCfg contains fields read from blockbook's blockchaincfg.json after being rendered from templates.
 type BlockchainCfg struct {
 	// more fields can be added later as needed
-	RpcUrl string `json:"rpc_url"`
+	RpcUrl   string `json:"rpc_url"`
+	RpcUrlWs string `json:"rpc_url_ws"`
 }
 
 // LoadBlockchainCfg returns the resolved blockchaincfg.json (env overrides are honored in tests)
