@@ -1,9 +1,10 @@
 //go:build integration
 
-package bchain_test
+package evm
 
 import (
 	"context"
+	"encoding/json"
 	"testing"
 	"time"
 
@@ -14,22 +15,19 @@ import (
 
 type openRPCFunc func(string, string) (bchain.EVMRPCClient, bchain.EVMClient, error)
 
-func TestEVMRPCClients(t *testing.T) {
-	openRPCOverrides := map[string]openRPCFunc{
-		"avalanche": avalanche.OpenRPC,
-	}
-	aliases := []string{"ethereum", "avalanche", "arbitrum", "base", "bsc", "optimism", "polygon"}
+var openRPCOverrides = map[string]openRPCFunc{
+	"avalanche": avalanche.OpenRPC,
+}
 
-	for _, alias := range aliases {
-		alias := alias
-		openRPC := eth.OpenRPC
-		if override, ok := openRPCOverrides[alias]; ok {
-			openRPC = override
-		}
-		t.Run(alias, func(t *testing.T) {
-			runEVMRPCClientIntegrationTest(t, alias, openRPC)
-		})
+func IntegrationTest(t *testing.T, coin string, _ bchain.BlockChain, _ bchain.Mempool, _ json.RawMessage) {
+	t.Helper()
+
+	openRPC := eth.OpenRPC
+	if override, ok := openRPCOverrides[coin]; ok {
+		openRPC = override
 	}
+
+	runEVMRPCClientIntegrationTest(t, coin, openRPC)
 }
 
 func runEVMRPCClientIntegrationTest(t *testing.T, coinAlias string, openRPC openRPCFunc) {

@@ -8,27 +8,32 @@ import (
 	"fmt"
 	"io/ioutil"
 	"net"
-	"os"
-	"path/filepath"
 	"reflect"
 	"sort"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/martinboehm/btcutil/chaincfg"
 	"github.com/trezor/blockbook/bchain"
 	"github.com/trezor/blockbook/bchain/coins"
-	build "github.com/trezor/blockbook/build/tools"
+	"github.com/trezor/blockbook/tests/evm"
 	"github.com/trezor/blockbook/tests/rpc"
-	"github.com/trezor/blockbook/tests/sync"
+	synctests "github.com/trezor/blockbook/tests/sync"
 )
 
 type TestFunc func(t *testing.T, coin string, chain bchain.BlockChain, mempool bchain.Mempool, testConfig json.RawMessage)
 
-var integrationTests = map[string]TestFunc{
-	"rpc":  rpc.IntegrationTest,
-	"sync": sync.IntegrationTest,
+type integrationTest struct {
+	fn            TestFunc
+	requiresChain bool
+}
+
+var integrationTests = map[string]integrationTest{
+	"rpc":              {fn: rpc.IntegrationTest, requiresChain: true},
+	"sync":             {fn: synctests.IntegrationTest, requiresChain: true},
+	"evm_connectivity": {fn: evm.IntegrationTest, requiresChain: false},
 }
 
 var notConnectedError = errors.New("Not connected to backend server")
@@ -77,17 +82,33 @@ func runTests(t *testing.T, coin string, cfg map[string]json.RawMessage) {
 	}
 	defer chaincfg.ResetParams()
 
-	bc, m, err := makeBlockChain(coin)
-	if err != nil {
-		if err == notConnectedError {
-			t.Fatal(err)
+	var (
+		bc       bchain.BlockChain
+		m        bchain.Mempool
+		initOnce sync.Once
+		initErr  error
+	)
+	ensureChain := func(t *testing.T) {
+		t.Helper()
+		initOnce.Do(func() {
+			bc, m, initErr = makeBlockChain(coin)
+		})
+		if initErr != nil {
+			if initErr == notConnectedError {
+				t.Fatal(initErr)
+			}
+			t.Fatalf("Cannot init blockchain: %s", initErr)
 		}
-		t.Fatalf("Cannot init blockchain: %s", err)
 	}
 
 	for test, c := range cfg {
-		if fn, found := integrationTests[test]; found {
-			t.Run(test, func(t *testing.T) { fn(t, coin, bc, m, c) })
+		if def, found := integrationTests[test]; found {
+			t.Run(test, func(t *testing.T) {
+				if def.requiresChain {
+					ensureChain(t)
+				}
+				def.fn(t, coin, bc, m, c)
+			})
 		} else {
 			t.Errorf("Test not found: %s", test)
 		}
@@ -95,29 +116,7 @@ func runTests(t *testing.T, coin string, cfg map[string]json.RawMessage) {
 }
 
 func makeBlockChain(coin string) (bchain.BlockChain, bchain.Mempool, error) {
-	c, err := build.LoadConfig("../configs", coin)
-	if err != nil {
-		return nil, nil, err
-	}
-
-	outputDir, err := ioutil.TempDir("", "integration_test")
-	if err != nil {
-		return nil, nil, err
-	}
-	defer os.RemoveAll(outputDir)
-
-	err = build.GeneratePackageDefinitions(c, "../build/templates", outputDir)
-	if err != nil {
-		return nil, nil, err
-	}
-
-	b, err := ioutil.ReadFile(filepath.Join(outputDir, "blockbook", "blockchaincfg.json"))
-	if err != nil {
-		return nil, nil, err
-	}
-
-	var cfg json.RawMessage
-	err = json.Unmarshal(b, &cfg)
+	cfg, err := bchain.LoadBlockchainCfgRaw(coin)
 	if err != nil {
 		return nil, nil, err
 	}
