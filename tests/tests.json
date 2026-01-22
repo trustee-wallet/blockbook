@@ -253,9 +253,11 @@
         "sync": ["ConnectBlocksParallel", "ConnectBlocks", "HandleFork"]
     },
     "arbitrum": {
+        "rpc": ["GetBlock", "GetBlockHash", "GetTransaction", "EstimateFee", "GetBlockHeader"],
         "evm_connectivity": true
     },
     "base": {
+        "rpc": ["GetBlock", "GetBlockHash", "GetTransaction", "EstimateFee", "GetBlockHeader"],
         "evm_connectivity": true
     },
     "ethereum": {
@@ -263,9 +265,11 @@
         "evm_connectivity": true
     },
     "optimism": {
+        "rpc": ["GetBlock", "GetBlockHash", "GetTransaction", "EstimateFee", "GetBlockHeader"],
         "evm_connectivity": true
     },
     "polygon": {
+        "rpc": ["GetBlock", "GetBlockHash", "GetTransaction", "EstimateFee", "GetBlockHeader"],
         "evm_connectivity": true
     }
 }
