@@ -20,6 +20,15 @@
         "0x4905c5f124342aa2f18e0db56f40328737b2f6ed230dbdd39b596ac660a0ca82",
         "0xde9ac37615f9d13c957dac39ebf36ce58e14e0bed639911cb7422c7046cd8a76"
     ],
+    "ethCallBatch": {
+        "address": "0xf70da97812cb96acdf810712aa562db8dfa3dbef",
+        "contracts": [
+            "0x82aF49447D8a07e3bd95BD0d56f35241523fBab1",
+            "0xFF970A61A04b1cA14834A43f5de4533eBDDB5CC8",
+            "0xfd086bc7cd5c481dcc9c85ebe478a1c0b69fcbb9",
+            "0xDA10009cBD5D07dd0CeCc66161FC93D7c9000da1"
+        ]
+    },
     "txDetails": {
         "0x67d497582571a24ba0c05079827159c34801d598120180c515162570ed0b775c": {
             "txid": "0x67d497582571a24ba0c05079827159c34801d598120180c515162570ed0b775c",
