@@ -26,7 +26,7 @@ func TestAvalancheErc20ContractBalancesIntegration(t *testing.T) {
 			common.HexToAddress("0x49D5c2BdFfac6Ce2BFdB6640F4F80f226bc10bAB"), // WETH.e
 			common.HexToAddress("0x60781C2586D68229fde47564546784ab3fACA982"), // PNG
 		},
-		BatchSize:       200,
+		BatchSize:       100,
 		SkipUnavailable: true,
 		NewClient:       eth.NewERC20BatchIntegrationClient,
 	})

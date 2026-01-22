@@ -24,7 +24,7 @@ func TestBNBSmartChainErc20ContractBalancesIntegration(t *testing.T) {
 			common.HexToAddress("0x8ac76a51cc950d9822d68b83fe1ad97b32cd580d"), // USDC
 			common.HexToAddress("0x1AF3F329e8BE154074D8769D1FFa4eE058B1DBc3"), // DAI
 		},
-		BatchSize:       200,
+		BatchSize:       100,
 		SkipUnavailable: true,
 		NewClient:       eth.NewERC20BatchIntegrationClient,
 	})

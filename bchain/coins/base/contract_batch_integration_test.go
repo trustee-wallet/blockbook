@@ -23,7 +23,7 @@ func TestBaseErc20ContractBalancesIntegration(t *testing.T) {
 			common.HexToAddress("0x50c5725949A6F0c72E6C4a641F24049A917DB0Cb"), // DAI
 			common.HexToAddress("0x2ae3f1ec7f1f5012cfeab0185bfc7aa3cf0dec22"), // cbETH
 		},
-		BatchSize:       200,
+		BatchSize:       100,
 		SkipUnavailable: true,
 		NewClient:       eth.NewERC20BatchIntegrationClient,
 	})
