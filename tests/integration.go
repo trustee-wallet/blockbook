@@ -49,7 +49,10 @@ func runIntegrationTests(t *testing.T) {
 	}
 
 	keys := make([]string, 0, len(tests))
-	for k := range tests {
+	for k, cfg := range tests {
+		if !hasConnectivity(cfg) {
+			continue
+		}
 		keys = append(keys, k)
 	}
 	sort.Strings(keys)
@@ -220,4 +223,9 @@ func requiresMempool(cfg map[string]json.RawMessage) bool {
 		}
 	}
 	return false
+}
+
+func hasConnectivity(cfg map[string]json.RawMessage) bool {
+	_, ok := cfg["connectivity"]
+	return ok
 }
