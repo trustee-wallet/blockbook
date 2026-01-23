@@ -79,8 +79,9 @@ func expandContracts(contracts []common.Address, minLen int) []common.Address {
 }
 
 type ERC20BatchClient interface {
-	EthereumTypeGetErc20ContractBalances(addrDesc AddressDescriptor, contractDescs []AddressDescriptor) ([]*big.Int, error)
-	EthereumTypeGetErc20ContractBalance(addrDesc, contractDesc AddressDescriptor) (*big.Int, error)
+	EthereumTypeGetErc20ContractBalancesAtBlock(addrDesc AddressDescriptor, contractDescs []AddressDescriptor, blockNumber *big.Int) ([]*big.Int, error)
+	EthereumTypeGetErc20ContractBalanceAtBlock(addrDesc, contractDesc AddressDescriptor, blockNumber *big.Int) (*big.Int, error)
+	GetBestBlockHeight() (uint32, error)
 }
 
 type ERC20BatchClientFactory func(rpcURL, rpcURLWS string, batchSize int) (ERC20BatchClient, func(), error)
@@ -94,7 +95,12 @@ func verifyBatchBalances(rpcClient ERC20BatchClient, addr common.Address, contra
 		contractDescs[i] = AddressDescriptor(c.Bytes())
 	}
 	addrDesc := AddressDescriptor(addr.Bytes())
-	balances, err := rpcClient.EthereumTypeGetErc20ContractBalances(addrDesc, contractDescs)
+	height, err := rpcClient.GetBestBlockHeight()
+	if err != nil {
+		return fmt.Errorf("best block height error: %w", err)
+	}
+	blockNumber := new(big.Int).SetUint64(uint64(height))
+	balances, err := rpcClient.EthereumTypeGetErc20ContractBalancesAtBlock(addrDesc, contractDescs, blockNumber)
 	if err != nil {
 		return fmt.Errorf("batch balances error: %w", err)
 	}
@@ -102,7 +108,7 @@ func verifyBatchBalances(rpcClient ERC20BatchClient, addr common.Address, contra
 		return fmt.Errorf("expected %d balances, got %d", len(contractDescs), len(balances))
 	}
 	for i, contractDesc := range contractDescs {
-		single, err := rpcClient.EthereumTypeGetErc20ContractBalance(addrDesc, contractDesc)
+		single, err := rpcClient.EthereumTypeGetErc20ContractBalanceAtBlock(addrDesc, contractDesc, blockNumber)
 		if err != nil {
 			return fmt.Errorf("single balance error for %s: %w", contracts[i].Hex(), err)
 		}

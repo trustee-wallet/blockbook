@@ -1107,22 +1107,26 @@ func (w *Worker) getEthereumTypeAddressBalances(addrDesc bchain.AddressDescripto
 	var n uint64
 	// unknown number of results for paging initially
 	d := ethereumTypeAddressData{totalResults: -1}
+	// Load cached contract list and totals from the index; this drives token lookups.
 	ca, err := w.db.GetAddrDescContracts(addrDesc)
 	if err != nil {
 		return nil, nil, NewAPIError(fmt.Sprintf("Address not found, %v", err), true)
 	}
+	// Always fetch the native balance from the backend.
 	b, err := w.chain.EthereumTypeGetBalance(addrDesc)
 	if err != nil {
 		return nil, nil, errors.Annotatef(err, "EthereumTypeGetBalance %v", addrDesc)
 	}
 	var filterDesc bchain.AddressDescriptor
 	if filter.Contract != "" {
+		// Optional contract filter narrows token balances and tx paging to a single contract.
 		filterDesc, err = w.chainParser.GetAddrDescFromAddress(filter.Contract)
 		if err != nil {
 			return nil, nil, NewAPIError(fmt.Sprintf("Invalid contract filter, %v", err), true)
 		}
 	}
 	if ca != nil {
+		// Address has indexed contract/tx data; include totals and nonce.
 		ba = &db.AddrBalance{
 			Txs: uint32(ca.TotalTxs),
 		}
@@ -1140,6 +1144,7 @@ func (w *Worker) getEthereumTypeAddressBalances(addrDesc bchain.AddressDescripto
 			erc20Contracts := make([]bchain.AddressDescriptor, 0, len(ca.Contracts))
 			for i := range ca.Contracts {
 				c := &ca.Contracts[i]
+				// Only fungible tokens are eligible; respect a contract filter if present.
 				if c.Standard != bchain.FungibleToken {
 					continue
 				}
@@ -1149,19 +1154,15 @@ func (w *Worker) getEthereumTypeAddressBalances(addrDesc bchain.AddressDescripto
 				erc20Contracts = append(erc20Contracts, c.Contract)
 			}
 			if len(erc20Contracts) > 1 {
-				if batcher, ok := w.chain.(interface {
-					EthereumTypeGetErc20ContractBalances(bchain.AddressDescriptor, []bchain.AddressDescriptor) ([]*big.Int, error)
-				}); ok {
-					balances, err := batcher.EthereumTypeGetErc20ContractBalances(addrDesc, erc20Contracts)
-					if err != nil {
-						glog.Warningf("EthereumTypeGetErc20ContractBalances addr %v: %v", addrDesc, err)
-					} else if len(balances) == len(erc20Contracts) {
-						// Keep only successful batch results; missing entries will trigger per-contract calls.
-						erc20Balances = make(map[string]*big.Int, len(erc20Contracts))
-						for i, bal := range balances {
-							if bal != nil {
-								erc20Balances[string(erc20Contracts[i])] = bal
-							}
+				balances, err := w.chain.EthereumTypeGetErc20ContractBalances(addrDesc, erc20Contracts)
+				if err != nil {
+					glog.Warningf("EthereumTypeGetErc20ContractBalances addr %v: %v", addrDesc, err)
+				} else if len(balances) == len(erc20Contracts) {
+					// Keep only successful batch results; missing entries will trigger per-contract calls.
+					erc20Balances = make(map[string]*big.Int, len(erc20Contracts))
+					for i, bal := range balances {
+						if bal != nil {
+							erc20Balances[string(erc20Contracts[i])] = bal
 						}
 					}
 				}
@@ -1179,6 +1180,7 @@ func (w *Worker) getEthereumTypeAddressBalances(addrDesc bchain.AddressDescripto
 					// filter only transactions of this contract
 					filter.Vout = i + db.ContractIndexOffset
 				}
+				// Use prefetched batch balances when available; nil triggers per-contract RPC in helper.
 				var erc20Balance *big.Int
 				if erc20Balances != nil {
 					erc20Balance = erc20Balances[string(c.Contract)]
@@ -1233,6 +1235,7 @@ func (w *Worker) getEthereumTypeAddressBalances(addrDesc bchain.AddressDescripto
 	d.nonce = strconv.Itoa(int(n))
 	// special handling if filtering for a contract, return the contract details even though the address had no transactions with it
 	if len(d.tokens) == 0 && len(filterDesc) > 0 && details >= AccountDetailsTokens {
+		// Query the backend directly to return contract metadata/balance for filtered views.
 		t, err := w.getEthereumContractBalanceFromBlockchain(addrDesc, filterDesc, details)
 		if err != nil {
 			return nil, nil, err
@@ -1245,6 +1248,7 @@ func (w *Worker) getEthereumTypeAddressBalances(addrDesc bchain.AddressDescripto
 	// if staking pool enabled, fetch the staking pool details
 	if details >= AccountDetailsBasic {
 		if len(w.chain.EthereumTypeGetSupportedStakingPools()) > 0 {
+			// Staking pools are fetched separately and do not participate in ERC20 batching.
 			d.stakingPools, err = w.getStakingPoolsData(addrDesc)
 			if err != nil {
 				return nil, nil, err

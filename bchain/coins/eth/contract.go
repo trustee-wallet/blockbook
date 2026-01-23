@@ -277,6 +277,11 @@ func contractGetTransfersFromTx(tx *bchain.RpcTransaction) (bchain.TokenTransfer
 
 // EthereumTypeRpcCall calls eth_call with given data and to address
 func (b *EthereumRPC) EthereumTypeRpcCall(data, to, from string) (string, error) {
+	return b.EthereumTypeRpcCallAtBlock(data, to, from, nil)
+}
+
+// EthereumTypeRpcCallAtBlock calls eth_call with given data and to address at a specific block.
+func (b *EthereumRPC) EthereumTypeRpcCallAtBlock(data, to, from string, blockNumber *big.Int) (string, error) {
 	args := map[string]interface{}{
 		"data": data,
 		"to":   to,
@@ -288,7 +293,8 @@ func (b *EthereumRPC) EthereumTypeRpcCall(data, to, from string) (string, error)
 	ctx, cancel := context.WithTimeout(context.Background(), b.Timeout)
 	defer cancel()
 	var r string
-	err := b.RPC.CallContext(ctx, &r, "eth_call", args, "latest")
+	blockArg := bchain.ToBlockNumArg(blockNumber)
+	err := b.RPC.CallContext(ctx, &r, "eth_call", args, blockArg)
 	if err != nil {
 		return "", err
 	}
@@ -354,9 +360,14 @@ func (b *EthereumRPC) GetContractInfo(contractDesc bchain.AddressDescriptor) (*b
 
 // EthereumTypeGetErc20ContractBalance returns balance of ERC20 contract for given address
 func (b *EthereumRPC) EthereumTypeGetErc20ContractBalance(addrDesc, contractDesc bchain.AddressDescriptor) (*big.Int, error) {
+	return b.EthereumTypeGetErc20ContractBalanceAtBlock(addrDesc, contractDesc, nil)
+}
+
+// EthereumTypeGetErc20ContractBalanceAtBlock returns balance of ERC20 contract for given address at a specific block.
+func (b *EthereumRPC) EthereumTypeGetErc20ContractBalanceAtBlock(addrDesc, contractDesc bchain.AddressDescriptor, blockNumber *big.Int) (*big.Int, error) {
 	contract := hexutil.Encode(contractDesc)
 	req := erc20BalanceOfCallData(addrDesc)
-	data, err := b.EthereumTypeRpcCall(req, contract, "")
+	data, err := b.EthereumTypeRpcCallAtBlock(req, contract, "", blockNumber)
 	if err != nil {
 		return nil, err
 	}
@@ -381,6 +392,12 @@ func (b *EthereumRPC) erc20BatchSize() int {
 // EthereumTypeGetErc20ContractBalances returns balances of multiple ERC20 contracts for given address.
 // It uses RPC batch calls and returns nil entries for failed/invalid results.
 func (b *EthereumRPC) EthereumTypeGetErc20ContractBalances(addrDesc bchain.AddressDescriptor, contractDescs []bchain.AddressDescriptor) ([]*big.Int, error) {
+	return b.EthereumTypeGetErc20ContractBalancesAtBlock(addrDesc, contractDescs, nil)
+}
+
+// EthereumTypeGetErc20ContractBalancesAtBlock returns balances of multiple ERC20 contracts for given address at a specific block.
+// It uses RPC batch calls and returns nil entries for failed/invalid results.
+func (b *EthereumRPC) EthereumTypeGetErc20ContractBalancesAtBlock(addrDesc bchain.AddressDescriptor, contractDescs []bchain.AddressDescriptor, blockNumber *big.Int) ([]*big.Int, error) {
 	if len(contractDescs) == 0 {
 		return nil, nil
 	}
@@ -398,18 +415,25 @@ func (b *EthereumRPC) EthereumTypeGetErc20ContractBalances(addrDesc bchain.Addre
 		if end > len(contractDescs) {
 			end = len(contractDescs)
 		}
-		batchBalances, err := b.erc20BalancesBatch(batcher, callData, contractDescs[start:end])
+		// Process a bounded slice to keep batch RPC requests within size limits.
+		batchBalances, err := b.erc20BalancesBatchAtBlock(batcher, callData, contractDescs[start:end], blockNumber)
 		if err != nil {
 			return nil, err
 		}
+		// Preserve original ordering when merging per-batch results.
 		copy(balances[start:end], batchBalances)
 	}
 	return balances, nil
 }
 
 func (b *EthereumRPC) erc20BalancesBatch(batcher batchCaller, callData string, contractDescs []bchain.AddressDescriptor) ([]*big.Int, error) {
+	return b.erc20BalancesBatchAtBlock(batcher, callData, contractDescs, nil)
+}
+
+func (b *EthereumRPC) erc20BalancesBatchAtBlock(batcher batchCaller, callData string, contractDescs []bchain.AddressDescriptor, blockNumber *big.Int) ([]*big.Int, error) {
 	results := make([]string, len(contractDescs))
 	batch := make([]rpc.BatchElem, len(contractDescs))
+	blockArg := bchain.ToBlockNumArg(blockNumber)
 	for i, contractDesc := range contractDescs {
 		args := map[string]interface{}{
 			"data": callData,
@@ -417,7 +441,7 @@ func (b *EthereumRPC) erc20BalancesBatch(batcher batchCaller, callData string, c
 		}
 		batch[i] = rpc.BatchElem{
 			Method: "eth_call",
-			Args:   []interface{}{args, "latest"},
+			Args:   []interface{}{args, blockArg},
 			Result: &results[i],
 		}
 	}
@@ -431,7 +455,7 @@ func (b *EthereumRPC) erc20BalancesBatch(batcher batchCaller, callData string, c
 		if batch[i].Error != nil {
 			glog.Warningf("erc20 batch eth_call failed for %s: %v", hexutil.Encode(contractDescs[i]), batch[i].Error)
 			// In case of batch failure, retry missing/failed elements as single calls.
-			data, err := b.EthereumTypeRpcCall(callData, hexutil.Encode(contractDescs[i]), "")
+			data, err := b.EthereumTypeRpcCallAtBlock(callData, hexutil.Encode(contractDescs[i]), "", blockNumber)
 			if err != nil {
 				glog.Warningf("erc20 single eth_call fallback failed for %s: %v", hexutil.Encode(contractDescs[i]), err)
 				continue
