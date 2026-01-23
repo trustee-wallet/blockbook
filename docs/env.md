@@ -12,10 +12,10 @@ Some behavior of Blockbook can be modified by environment variables. The variabl
 
 ## Build-time variables
 
--   `BB_RPC_URL_<coin alias>` - Overrides `ipc.rpc_url_template` during package/config generation so build and
+-   `BB_RPC_URL_HTTP_<coin alias>` - Overrides `ipc.rpc_url_template` during package/config generation so build and
     integration-test tooling can target hosted HTTP RPC endpoints without editing coin JSON.
 -   `BB_RPC_URL_WS_<coin alias>` - Overrides `ipc.rpc_url_ws_template` for WebSocket subscriptions; should point to
-    the same host as `BB_RPC_URL_<coin alias>`.
+    the same host as `BB_RPC_URL_HTTP_<coin alias>`.
 -   `BB_RPC_BIND_HOST_<coin alias>` - Overrides backend RPC bind host during package/config generation; when set to
     `0.0.0.0`, RPC stays restricted unless `BB_RPC_ALLOW_IP_<coin alias>` is set.
 -   `BB_RPC_ALLOW_IP_<coin alias>` - Overrides backend RPC allow list for UTXO configs (e.g. `rpcallowip`), defaulting
