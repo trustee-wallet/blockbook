@@ -102,6 +102,7 @@
         "sync": ["ConnectBlocksParallel", "ConnectBlocks"]
     },
     "dogecoin": {
+        "connectivity": ["http"],
         "rpc": ["GetBlock", "GetBlockHash", "GetTransaction", "MempoolSync"],
         "sync": ["ConnectBlocksParallel", "ConnectBlocks"]
     },
@@ -145,6 +146,7 @@
         "sync": ["ConnectBlocksParallel", "ConnectBlocks", "HandleFork"]
     },
     "litecoin": {
+        "connectivity": ["http"],
         "rpc": ["GetBlock", "GetBlockHash", "GetTransaction", "GetTransactionForMempool", "MempoolSync",
                 "EstimateSmartFee", "EstimateFee"],
         "sync": ["ConnectBlocksParallel", "ConnectBlocks", "HandleFork"]
@@ -168,6 +170,7 @@
         "sync": ["ConnectBlocksParallel", "ConnectBlocks", "HandleFork"]
     },
     "zcash": {
+        "connectivity": ["http"],
         "rpc": ["GetBlock", "GetBlockHash", "GetTransaction", "GetTransactionForMempool", "MempoolSync",
                 "GetBestBlockHash", "GetBestBlockHeight", "GetBlockHeader"],
         "sync": ["ConnectBlocksParallel", "ConnectBlocks", "HandleFork"]

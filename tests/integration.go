@@ -92,10 +92,11 @@ func runTests(t *testing.T, coin string, cfg map[string]json.RawMessage) {
 		initOnce sync.Once
 		initErr  error
 	)
+	needsMempool := requiresMempool(cfg)
 	ensureChain := func(t *testing.T) {
 		t.Helper()
 		initOnce.Do(func() {
-			bc, m, initErr = makeBlockChain(coin)
+			bc, m, initErr = makeBlockChain(coin, needsMempool)
 		})
 		if initErr != nil {
 			if initErr == notConnectedError {
@@ -119,7 +120,7 @@ func runTests(t *testing.T, coin string, cfg map[string]json.RawMessage) {
 	}
 }
 
-func makeBlockChain(coin string) (bchain.BlockChain, bchain.Mempool, error) {
+func makeBlockChain(coin string, needsMempool bool) (bchain.BlockChain, bchain.Mempool, error) {
 	cfg, err := bchain.LoadBlockchainCfgRaw(coin)
 	if err != nil {
 		return nil, nil, err
@@ -130,7 +131,7 @@ func makeBlockChain(coin string) (bchain.BlockChain, bchain.Mempool, error) {
 		return nil, nil, err
 	}
 
-	return initBlockChain(coinName, cfg)
+	return initBlockChain(coinName, cfg, needsMempool)
 }
 
 func getName(raw json.RawMessage) (string, error) {
@@ -151,7 +152,7 @@ func getName(raw json.RawMessage) (string, error) {
 	}
 }
 
-func initBlockChain(coinName string, cfg json.RawMessage) (bchain.BlockChain, bchain.Mempool, error) {
+func initBlockChain(coinName string, cfg json.RawMessage, initMempool bool) (bchain.BlockChain, bchain.Mempool, error) {
 	factory, found := coins.BlockChainFactories[coinName]
 	if !found {
 		return nil, nil, fmt.Errorf("Factory function not found")
@@ -180,22 +181,43 @@ func initBlockChain(coinName string, cfg json.RawMessage) (bchain.BlockChain, bc
 		time.Sleep(time.Millisecond * 1000)
 	}
 
-	mempool, err := chain.CreateMempool(chain)
-	if err != nil {
-		return nil, nil, fmt.Errorf("Mempool creation failed: %s", err)
+	if initMempool {
+		mempool, err := chain.CreateMempool(chain)
+		if err != nil {
+			return nil, nil, fmt.Errorf("Mempool creation failed: %s", err)
+		}
+
+		err = chain.InitializeMempool(nil, nil, nil)
+		if err != nil {
+			return nil, nil, fmt.Errorf("Mempool initialization failed: %s", err)
+		}
+
+		return chain, mempool, nil
 	}
 
-	err = chain.InitializeMempool(nil, nil, nil)
-	if err != nil {
-		return nil, nil, fmt.Errorf("Mempool initialization failed: %s", err)
-	}
-
-	return chain, mempool, nil
+	return chain, nil, nil
 }
 
 func isNetError(err error) bool {
 	if _, ok := err.(net.Error); ok {
 		return true
+	}
+	return false
+}
+
+func requiresMempool(cfg map[string]json.RawMessage) bool {
+	tests, ok := cfg["rpc"]
+	if !ok || len(tests) == 0 {
+		return false
+	}
+	var rpcTests []string
+	if err := json.Unmarshal(tests, &rpcTests); err != nil {
+		return true
+	}
+	for _, test := range rpcTests {
+		if test == "MempoolSync" || test == "GetTransactionForMempool" {
+			return true
+		}
 	}
 	return false
 }
