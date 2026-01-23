@@ -204,6 +204,8 @@ func testGetTransactionForMempool(t *testing.T, h *TestHandler) {
 	for txid, want := range h.TestData.TxDetails {
 		// reset fields that are not parsed by BlockChainParser
 		want.Confirmations, want.Blocktime, want.Time, want.CoinSpecificData = 0, 0, 0, nil
+		// Mempool endpoints may or may not include segwit witness; keep comparisons backend-agnostic.
+		stripWitness(want)
 
 		got, err := h.Chain.GetTransactionForMempool(txid)
 		if err != nil {
@@ -215,6 +217,7 @@ func testGetTransactionForMempool(t *testing.T, h *TestHandler) {
 
 		// transactions parsed from JSON may contain additional data
 		got.Confirmations, got.Blocktime, got.Time, got.CoinSpecificData = 0, 0, 0, nil
+		stripWitness(got)
 		if !reflect.DeepEqual(got, want) {
 			t.Errorf("GetTransactionForMempool() got %+#v, want %+#v", got, want)
 		}
@@ -245,6 +248,12 @@ func normalizeAddresses(tx *bchain.Tx, parser bchain.BlockChainParser) {
 				}
 			}
 		}
+	}
+}
+
+func stripWitness(tx *bchain.Tx) {
+	for i := range tx.Vin {
+		tx.Vin[i].Witness = nil
 	}
 }
 
@@ -334,6 +343,10 @@ func testGetBestBlockHash(t *testing.T, h *TestHandler) {
 		}
 		hh, err := h.Chain.GetBlockHash(height)
 		if err != nil {
+			if err == bchain.ErrBlockNotFound {
+				time.Sleep(time.Millisecond * 100)
+				continue
+			}
 			t.Fatal(err)
 		}
 		if hash != hh {

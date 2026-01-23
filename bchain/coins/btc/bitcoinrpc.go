@@ -512,7 +512,8 @@ func (b *BitcoinRPC) GetChainInfo() (*bchain.ChainInfo, error) {
 // IsErrBlockNotFound returns true if error means block was not found
 func IsErrBlockNotFound(err *bchain.RPCError) bool {
 	return err.Message == "Block not found" ||
-		err.Message == "Block height out of range"
+		err.Message == "Block height out of range" ||
+		err.Message == "Provided index is greater than the current tip"
 }
 
 // GetBlockHash returns hash of block in best-block-chain at given height.
