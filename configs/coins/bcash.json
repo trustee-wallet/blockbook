@@ -52,7 +52,7 @@
             "address_format": "cashaddr",
             "mempool_workers": 8,
             "mempool_sub_workers": 2,
-            "mempool_resync_batch_size": 200,
+            "mempool_resync_batch_size": 100,
             "block_addresses_to_keep": 300,
             "xpub_magic": 76067358,
             "slip44": 145,
