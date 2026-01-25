@@ -271,15 +271,20 @@ func testMempoolSync(t *testing.T, h *TestHandler) {
 			continue
 		}
 
+		beforeIntersect := len(txs)
 		txs = intersect(txs, getMempool(t, h))
 		if len(txs) == 0 {
 			// no transactions to test
 			continue
 		}
-		const maxMempoolSyncTxs = 200
-		if len(txs) > maxMempoolSyncTxs {
-			txs = txs[:maxMempoolSyncTxs]
+		if beforeIntersect >= 20 {
+			ratio := float64(len(txs)) / float64(beforeIntersect)
+			if ratio < 0.2 {
+				t.Fatalf("mempool intersect too small: after=%d before=%d ratio=%.2f", len(txs), beforeIntersect, ratio)
+			}
 		}
+		const mempoolSyncStride = 5
+		txs = sampleEveryNth(txs, mempoolSyncStride)
 
 		txid2addrs := getTxid2addrs(t, h, txs)
 		if len(txid2addrs) == 0 {
@@ -576,6 +581,17 @@ func intersect(a, b []string) []string {
 		res = append(res, v.(string))
 	}
 	return res
+}
+
+func sampleEveryNth(txs []string, stride int) []string {
+	if stride <= 1 || len(txs) <= stride {
+		return txs
+	}
+	sampled := make([]string, 0, (len(txs)+stride-1)/stride)
+	for idx := 0; idx < len(txs); idx += stride {
+		sampled = append(sampled, txs[idx])
+	}
+	return sampled
 }
 
 func containsTx(o []bchain.Outpoint, tx string) bool {

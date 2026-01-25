@@ -59,7 +59,6 @@
             "parse": true,
             "mempool_workers": 8,
             "mempool_sub_workers": 2,
-            "mempool_resync_batch_size": 100,
             "block_addresses_to_keep": 300,
             "xpub_magic": 27108450,
             "xpub_magic_segwit_p2sh": 28471030,
