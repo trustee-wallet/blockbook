@@ -3,6 +3,7 @@ package bchain
 import (
 	"context"
 	"encoding/hex"
+	"fmt"
 	"math/big"
 	"sync"
 	"sync/atomic"
@@ -25,6 +26,9 @@ type txPayload struct {
 type resyncOutpointCache struct {
 	mu      sync.RWMutex
 	entries map[Outpoint]outpointInfo
+	// hits/misses track cache effectiveness without impacting read paths with extra locks.
+	hits   uint64
+	misses uint64
 }
 
 type outpointInfo struct {
@@ -41,8 +45,11 @@ func (c *resyncOutpointCache) get(outpoint Outpoint) (AddressDescriptor, *big.In
 	entry, ok := c.entries[outpoint]
 	c.mu.RUnlock()
 	if !ok {
+		// Use atomics to avoid lock contention on hot lookup paths.
+		atomic.AddUint64(&c.misses, 1)
 		return nil, nil, false
 	}
+	atomic.AddUint64(&c.hits, 1)
 	return entry.addrDesc, entry.value, true
 }
 
@@ -63,6 +70,10 @@ func (c *resyncOutpointCache) len() int {
 	n := len(c.entries)
 	c.mu.RUnlock()
 	return n
+}
+
+func (c *resyncOutpointCache) stats() (uint64, uint64) {
+	return atomic.LoadUint64(&c.hits), atomic.LoadUint64(&c.misses)
 }
 
 // MempoolBitcoinType is mempool handle.
@@ -133,6 +144,13 @@ func NewMempoolBitcoinType(chain BlockChain, workers int, subworkers int, golomb
 func (m *MempoolBitcoinType) getResyncOutpointCache() *resyncOutpointCache {
 	cache, _ := m.resyncOutpoints.Load().(*resyncOutpointCache)
 	return cache
+}
+
+func roundDuration(d time.Duration, unit time.Duration) time.Duration {
+	if unit <= 0 {
+		return d
+	}
+	return d.Round(unit)
 }
 
 func (m *MempoolBitcoinType) getInputAddress(payload *chanInputPayload) *addrIndex {
@@ -441,10 +459,23 @@ func (m *MempoolBitcoinType) Resync() (count int, err error) {
 		if cache := m.getResyncOutpointCache(); cache != nil {
 			outpointCacheEntries = cache.len()
 		}
+		listDurationRounded := roundDuration(listDuration, time.Millisecond)
+		processDurationRounded := roundDuration(processDuration, time.Millisecond)
+		totalDurationRounded := roundDuration(totalDuration, time.Millisecond)
+		avgPerTxRounded := roundDuration(avgPerTx, time.Microsecond)
 		if err != nil {
-			glog.Warning("mempool: resync failed size=", mempoolSize, " missing=", missingCount, " outpoint_cache_entries=", outpointCacheEntries, " batch_size=", batchSize, " batch_workers=", batchWorkers, " list_duration=", listDuration, " process_duration=", processDuration, " duration=", totalDuration, " avg_per_tx=", avgPerTx, " err=", err)
+			glog.Warning("mempool: resync failed size=", mempoolSize, " missing=", missingCount, " outpoint_cache_entries=", outpointCacheEntries, " batch_size=", batchSize, " batch_workers=", batchWorkers, " list_duration=", listDurationRounded, " process_duration=", processDurationRounded, " duration=", totalDurationRounded, " avg_per_tx=", avgPerTxRounded, " err=", err)
 		} else {
-			glog.Info("mempool: resync finished size=", mempoolSize, " missing=", missingCount, " outpoint_cache_entries=", outpointCacheEntries, " batch_size=", batchSize, " batch_workers=", batchWorkers, " list_duration=", listDuration, " process_duration=", processDuration, " duration=", totalDuration, " avg_per_tx=", avgPerTx)
+			glog.Info("mempool: resync finished size=", mempoolSize, " missing=", missingCount, " outpoint_cache_entries=", outpointCacheEntries, " batch_size=", batchSize, " batch_workers=", batchWorkers, " list_duration=", listDurationRounded, " process_duration=", processDurationRounded, " duration=", totalDurationRounded, " avg_per_tx=", avgPerTxRounded)
+		}
+		if cache := m.getResyncOutpointCache(); cache != nil {
+			hits, misses := cache.stats()
+			total := hits + misses
+			hitRate := 0.0
+			if total > 0 {
+				hitRate = float64(hits) / float64(total)
+			}
+			glog.Info("mempool: resync outpoint cache hits=", hits, " misses=", misses, " hit_rate=", fmt.Sprintf("%.3f", hitRate))
 		}
 		m.resyncOutpoints.Store((*resyncOutpointCache)(nil))
 	}()
