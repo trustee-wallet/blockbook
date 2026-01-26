@@ -253,26 +253,26 @@ func (w *SyncWorker) connectBlocks(onNewBlock bchain.OnNewBlockFunc, initialSync
 		return nil
 	}
 
-	if initialSync {
-	ConnectLoop:
-		for {
-			select {
-			case <-w.chanOsSignal:
-				glog.Info("connectBlocks interrupted at height ", lastRes.block.Height)
-				return ErrOperationInterrupted
-			case res := <-bch:
-				if res == empty {
-					break ConnectLoop
-				}
-				err := connect(res)
-				if err != nil {
-					return err
-				}
-			}
+	logInterrupted := func() {
+		if lastRes.block != nil {
+			glog.Info("connectBlocks interrupted at height ", lastRes.block.Height)
+		} else {
+			glog.Info("connectBlocks interrupted")
 		}
-	} else {
-		// while regular sync, OS sig is handled by waitForSignalAndShutdown
-		for res := range bch {
+	}
+	// During regular sync, shutdown is now signaled by closing chanOsSignal,
+	// so we honor it here to avoid leaving RocksDB in an open state.
+	// Initial sync uses the same shutdown-aware loop.
+ConnectLoop:
+	for {
+		select {
+		case <-w.chanOsSignal:
+			logInterrupted()
+			return ErrOperationInterrupted
+		case res := <-bch:
+			if res == empty {
+				break ConnectLoop
+			}
 			err := connect(res)
 			if err != nil {
 				return err
