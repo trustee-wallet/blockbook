@@ -30,6 +30,94 @@ func bigintFromStringToHex(s string) string {
 	return bigintToHex(&b)
 }
 
+func makeTestAddrDesc(seed int) bchain.AddressDescriptor {
+	b := make([]byte, eth.EthereumTypeAddressDescriptorLen)
+	b[0] = byte(seed >> 8)
+	if len(b) > 1 {
+		b[1] = byte(seed)
+	}
+	for i := 2; i < len(b); i++ {
+		b[i] = byte(seed)
+	}
+	return b
+}
+
+func Test_unpackedAddrContracts_findContractIndex_LazyMap(t *testing.T) {
+	acs := &unpackedAddrContracts{}
+	for i := 0; i < addrContractsIndexMinSize+2; i++ {
+		acs.Contracts = append(acs.Contracts, unpackedAddrContract{
+			Contract: makeTestAddrDesc(i),
+		})
+	}
+
+	target := acs.Contracts[addrContractsIndexMinSize].Contract
+	idx, found := acs.findContractIndex(target)
+	if !found || idx != addrContractsIndexMinSize {
+		t.Fatalf("findContractIndex() = (%v, %v), want (%v, true)", idx, found, addrContractsIndexMinSize)
+	}
+	if acs.contractIndex == nil {
+		t.Fatal("expected contract index map to be built")
+	}
+
+	missing := makeTestAddrDesc(addrContractsIndexMinSize + 1024)
+	if _, found := findContractInAddressContracts(missing, acs.Contracts); found {
+		missing = makeTestAddrDesc(addrContractsIndexMinSize + 2048)
+		if _, found := findContractInAddressContracts(missing, acs.Contracts); found {
+			t.Fatal("failed to generate a missing contract for test")
+		}
+	}
+	if _, found := acs.findContractIndex(missing); found {
+		t.Fatal("expected missing contract to be not found")
+	}
+}
+
+func Test_unpackedAddrContracts_findContractIndex_DirtyRebuild(t *testing.T) {
+	acs := &unpackedAddrContracts{}
+	for i := 0; i < addrContractsIndexMinSize+1; i++ {
+		acs.Contracts = append(acs.Contracts, unpackedAddrContract{
+			Contract: makeTestAddrDesc(i),
+		})
+	}
+
+	_, _ = acs.findContractIndex(acs.Contracts[0].Contract)
+	if acs.contractIndex == nil {
+		t.Fatal("expected contract index map to be built")
+	}
+
+	// Remove a contract and mark the index dirty to force rebuild.
+	removed := acs.Contracts[1].Contract
+	acs.Contracts = append(acs.Contracts[:1], acs.Contracts[2:]...)
+	acs.markContractIndexDirty()
+
+	if _, found := acs.findContractIndex(removed); found {
+		t.Fatal("expected removed contract to be not found after rebuild")
+	}
+	if idx, found := acs.findContractIndex(acs.Contracts[1].Contract); !found || idx != 1 {
+		t.Fatalf("findContractIndex() = (%v, %v), want (1, true)", idx, found)
+	}
+}
+
+func Test_unpackedAddrContracts_findContractIndex_InvalidLenFallback(t *testing.T) {
+	acs := &unpackedAddrContracts{}
+	for i := 0; i < addrContractsIndexMinSize; i++ {
+		acs.Contracts = append(acs.Contracts, unpackedAddrContract{
+			Contract: makeTestAddrDesc(i),
+		})
+	}
+	invalid := bchain.AddressDescriptor([]byte{1, 2, 3})
+	acs.Contracts = append(acs.Contracts, unpackedAddrContract{Contract: invalid})
+
+	// Build index, which will skip the invalid entry.
+	_, _ = acs.findContractIndex(acs.Contracts[0].Contract)
+	if acs.contractIndex == nil {
+		t.Fatal("expected contract index map to be built")
+	}
+
+	if idx, found := acs.findContractIndex(invalid); !found || idx != len(acs.Contracts)-1 {
+		t.Fatalf("findContractIndex() = (%v, %v), want (%v, true)", idx, found, len(acs.Contracts)-1)
+	}
+}
+
 func verifyAfterEthereumTypeBlock1(t *testing.T, d *RocksDB, afterDisconnect bool) {
 	if err := checkColumn(d, cfHeight, []keyPair{
 		{
