@@ -57,7 +57,7 @@ const (
 	addressBalanceDetailUTXOIndexed = 2
 )
 
-const addrContractsCacheMinSize = 300_000 // limit for caching address contracts in memory to speed up indexing
+const addrContractsCacheMinSize = 100_000 // limit for caching address contracts in memory to speed up indexing
 
 // RocksDB handle
 type RocksDB struct {
