@@ -58,7 +58,7 @@ func verifyAfterEthereumTypeBlock1(t *testing.T, d *RocksDB, afterDisconnect boo
 		{dbtestdata.AddressToPubKeyHex(dbtestdata.EthAddr3e, d.chainParser), "02010200", nil},
 		{
 			dbtestdata.AddressToPubKeyHex(dbtestdata.EthAddr55, d.chainParser),
-			"02010001" + dbtestdata.AddressToPubKeyHex(dbtestdata.EthAddrContract4a, d.chainParser) + varuintToHex(1<<2+uint(bchain.FungibleToken)) + bigintFromStringToHex("10000000000000000000000"), nil,
+			"02010001" + dbtestdata.AddressToPubKeyHex(dbtestdata.EthAddrContract4a, d.chainParser) + varuintToHex(1<<2+uint(bchain.FungibleToken)) + bigintToHex(big.NewInt(0)), nil,
 		},
 		{
 			dbtestdata.AddressToPubKeyHex(dbtestdata.EthAddr20, d.chainParser),
@@ -186,15 +186,15 @@ func verifyAfterEthereumTypeBlock2(t *testing.T, d *RocksDB, wantBlockInternalDa
 		{
 			dbtestdata.AddressToPubKeyHex(dbtestdata.EthAddr4b, d.chainParser),
 			"01010102" +
-				dbtestdata.AddressToPubKeyHex(dbtestdata.EthAddrContract0d, d.chainParser) + varuintToHex(2<<2+uint(bchain.FungibleToken)) + bigintFromStringToHex("8086") +
-				dbtestdata.AddressToPubKeyHex(dbtestdata.EthAddrContract4a, d.chainParser) + varuintToHex(2<<2+uint(bchain.FungibleToken)) + bigintFromStringToHex("871180000950184"), nil,
+				dbtestdata.AddressToPubKeyHex(dbtestdata.EthAddrContract0d, d.chainParser) + varuintToHex(2<<2+uint(bchain.FungibleToken)) + bigintToHex(big.NewInt(0)) +
+				dbtestdata.AddressToPubKeyHex(dbtestdata.EthAddrContract4a, d.chainParser) + varuintToHex(2<<2+uint(bchain.FungibleToken)) + bigintToHex(big.NewInt(0)), nil,
 		},
 		{
 			dbtestdata.AddressToPubKeyHex(dbtestdata.EthAddr55, d.chainParser),
 			"05030003" +
-				dbtestdata.AddressToPubKeyHex(dbtestdata.EthAddrContract4a, d.chainParser) + varuintToHex(2<<2+uint(bchain.FungibleToken)) + bigintFromStringToHex("10000000854307892726464") +
-				dbtestdata.AddressToPubKeyHex(dbtestdata.EthAddrContract0d, d.chainParser) + varuintToHex(1<<2+uint(bchain.FungibleToken)) + bigintFromStringToHex("0") +
-				dbtestdata.AddressToPubKeyHex(dbtestdata.EthAddr55, d.chainParser) + varuintToHex(1<<2+uint(bchain.FungibleToken)) + bigintFromStringToHex("0"), nil,
+				dbtestdata.AddressToPubKeyHex(dbtestdata.EthAddrContract4a, d.chainParser) + varuintToHex(2<<2+uint(bchain.FungibleToken)) + bigintToHex(big.NewInt(0)) +
+				dbtestdata.AddressToPubKeyHex(dbtestdata.EthAddrContract0d, d.chainParser) + varuintToHex(1<<2+uint(bchain.FungibleToken)) + bigintToHex(big.NewInt(0)) +
+				dbtestdata.AddressToPubKeyHex(dbtestdata.EthAddr55, d.chainParser) + varuintToHex(1<<2+uint(bchain.FungibleToken)) + bigintToHex(big.NewInt(0)), nil,
 		},
 		{
 			dbtestdata.AddressToPubKeyHex(dbtestdata.EthAddr5d, d.chainParser),
@@ -203,8 +203,8 @@ func verifyAfterEthereumTypeBlock2(t *testing.T, d *RocksDB, wantBlockInternalDa
 		{
 			dbtestdata.AddressToPubKeyHex(dbtestdata.EthAddr7b, d.chainParser),
 			"02000003" +
-				dbtestdata.AddressToPubKeyHex(dbtestdata.EthAddrContract4a, d.chainParser) + varuintToHex(1<<2+uint(bchain.FungibleToken)) + bigintFromStringToHex("0") +
-				dbtestdata.AddressToPubKeyHex(dbtestdata.EthAddrContract0d, d.chainParser) + varuintToHex(1<<2+uint(bchain.FungibleToken)) + bigintFromStringToHex("7674999999999991915") +
+				dbtestdata.AddressToPubKeyHex(dbtestdata.EthAddrContract4a, d.chainParser) + varuintToHex(1<<2+uint(bchain.FungibleToken)) + bigintToHex(big.NewInt(0)) +
+				dbtestdata.AddressToPubKeyHex(dbtestdata.EthAddrContract0d, d.chainParser) + varuintToHex(1<<2+uint(bchain.FungibleToken)) + bigintToHex(big.NewInt(0)) +
 				dbtestdata.AddressToPubKeyHex(dbtestdata.EthAddrContractCd, d.chainParser) + varuintToHex(1<<2+uint(bchain.NonFungibleToken)) + varuintToHex(1) + bigintFromStringToHex("1"), nil,
 		},
 		{
@@ -962,7 +962,7 @@ func Test_addToContracts(t *testing.T) {
 						Standard: bchain.FungibleToken,
 						Contract: addressToAddrDesc(dbtestdata.EthAddrContract47, parser),
 						Txs:      1,
-						Value:    *big.NewInt(123456),
+						Value:    *big.NewInt(0),
 					},
 				},
 			},
@@ -984,7 +984,7 @@ func Test_addToContracts(t *testing.T) {
 					{
 						Standard: bchain.FungibleToken,
 						Contract: addressToAddrDesc(dbtestdata.EthAddrContract47, parser),
-						Value:    *big.NewInt(100000),
+						Value:    *big.NewInt(0),
 						Txs:      2,
 					},
 				},
@@ -1007,7 +1007,7 @@ func Test_addToContracts(t *testing.T) {
 					{
 						Standard: bchain.FungibleToken,
 						Contract: addressToAddrDesc(dbtestdata.EthAddrContract47, parser),
-						Value:    *big.NewInt(100000),
+						Value:    *big.NewInt(0),
 						Txs:      2,
 					},
 					{
@@ -1036,7 +1036,7 @@ func Test_addToContracts(t *testing.T) {
 					{
 						Standard: bchain.FungibleToken,
 						Contract: addressToAddrDesc(dbtestdata.EthAddrContract47, parser),
-						Value:    *big.NewInt(100000),
+						Value:    *big.NewInt(0),
 						Txs:      2,
 					},
 					{
@@ -1065,7 +1065,7 @@ func Test_addToContracts(t *testing.T) {
 					{
 						Standard: bchain.FungibleToken,
 						Contract: addressToAddrDesc(dbtestdata.EthAddrContract47, parser),
-						Value:    *big.NewInt(100000),
+						Value:    *big.NewInt(0),
 						Txs:      2,
 					},
 					{
@@ -1099,7 +1099,7 @@ func Test_addToContracts(t *testing.T) {
 					{
 						Standard: bchain.FungibleToken,
 						Contract: addressToAddrDesc(dbtestdata.EthAddrContract47, parser),
-						Value:    *big.NewInt(100000),
+						Value:    *big.NewInt(0),
 						Txs:      2,
 					},
 					{
@@ -1148,7 +1148,7 @@ func Test_addToContracts(t *testing.T) {
 					{
 						Standard: bchain.FungibleToken,
 						Contract: addressToAddrDesc(dbtestdata.EthAddrContract47, parser),
-						Value:    *big.NewInt(100000),
+						Value:    *big.NewInt(0),
 						Txs:      2,
 					},
 					{
@@ -1201,7 +1201,7 @@ func Test_addToContracts(t *testing.T) {
 					{
 						Standard: bchain.FungibleToken,
 						Contract: addressToAddrDesc(dbtestdata.EthAddrContract47, parser),
-						Value:    *big.NewInt(100000),
+						Value:    *big.NewInt(0),
 						Txs:      2,
 					},
 					{

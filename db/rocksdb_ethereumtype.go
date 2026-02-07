@@ -418,7 +418,10 @@ func addToContract(c *unpackedAddrContract, contractIndex int, index int32, cont
 		}
 	}
 	if transfer.Standard == bchain.FungibleToken {
-		aggregate(c.Value.get(), &transfer.Value)
+		// Skip ERC20 balance aggregation; ensure a zero value is available for packing.
+		if c.Value.Value == nil && len(c.Value.Slice) == 0 {
+			c.Value.Value = big.NewInt(0)
+		}
 	} else if transfer.Standard == bchain.NonFungibleToken {
 		if index < 0 {
 			c.Ids.remove(transfer.Value)
