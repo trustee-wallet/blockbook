@@ -465,13 +465,14 @@ func (d *RocksDB) addToAddressesAndContractsEthereumType(addrDesc bchain.Address
 		// do not store contracts for 0x0000000000000000000000000000000000000000 address
 		if !isZeroAddress(addrDesc) {
 			// locate the contract and set i to the index in the array of contracts
-			contractIndex, found := findContractInAddressContracts(contract, ac.Contracts)
+			contractIndex, found := ac.findContractIndex(contract)
 			if !found {
 				contractIndex = len(ac.Contracts)
 				ac.Contracts = append(ac.Contracts, unpackedAddrContract{
 					Contract: contract,
 					Standard: transfer.Standard,
 				})
+				ac.addContractIndex(contract, contractIndex)
 			}
 			c := &ac.Contracts[contractIndex]
 			index = addToContract(c, contractIndex, index, contract, transfer, addTxCount)
@@ -1346,7 +1347,7 @@ func (d *RocksDB) disconnectAddress(btxID []byte, internal bool, addrDesc bchain
 				}
 			}
 		} else {
-			contractIndex, found := findContractInAddressContracts(btxContract.contract, addrContracts.Contracts)
+			contractIndex, found := addrContracts.findContractIndex(btxContract.contract)
 			if found {
 				addrContract := &addrContracts.Contracts[contractIndex]
 				if addrContract.Txs > 0 {
@@ -1354,6 +1355,7 @@ func (d *RocksDB) disconnectAddress(btxID []byte, internal bool, addrDesc bchain
 					if addrContract.Txs == 0 {
 						// no transactions, remove the contract
 						addrContracts.Contracts = append(addrContracts.Contracts[:contractIndex], addrContracts.Contracts[contractIndex+1:]...)
+						addrContracts.markContractIndexDirty()
 					} else {
 						// update the values of the contract, reverse the direction
 						var index int32
@@ -1593,6 +1595,73 @@ type unpackedAddrContracts struct {
 	NonContractTxs uint
 	InternalTxs    uint
 	Contracts      []unpackedAddrContract
+	// contractIndex lazily maps contract address -> index for large contract lists.
+	contractIndex      map[contractIndexKey]int
+	contractIndexDirty bool
+}
+
+const addrContractsIndexMinSize = 256
+
+type contractIndexKey [eth.EthereumTypeAddressDescriptorLen]byte
+
+func contractIndexKeyFromDesc(addr bchain.AddressDescriptor) (contractIndexKey, bool) {
+	var key contractIndexKey
+	if len(addr) != len(key) {
+		return key, false
+	}
+	copy(key[:], addr)
+	return key, true
+}
+
+func (acs *unpackedAddrContracts) rebuildContractIndex() {
+	if len(acs.Contracts) < addrContractsIndexMinSize {
+		acs.contractIndex = nil
+		acs.contractIndexDirty = false
+		return
+	}
+	m := make(map[contractIndexKey]int, len(acs.Contracts))
+	for i := range acs.Contracts {
+		if key, ok := contractIndexKeyFromDesc(acs.Contracts[i].Contract); ok {
+			m[key] = i
+		}
+	}
+	acs.contractIndex = m
+	acs.contractIndexDirty = false
+}
+
+func (acs *unpackedAddrContracts) findContractIndex(contract bchain.AddressDescriptor) (int, bool) {
+	if len(acs.Contracts) >= addrContractsIndexMinSize {
+		if acs.contractIndex == nil || acs.contractIndexDirty {
+			acs.rebuildContractIndex()
+		}
+		if acs.contractIndex != nil {
+			if key, ok := contractIndexKeyFromDesc(contract); ok {
+				if idx, found := acs.contractIndex[key]; found {
+					return idx, true
+				}
+				return 0, false
+			}
+		}
+	}
+	return findContractInAddressContracts(contract, acs.Contracts)
+}
+
+func (acs *unpackedAddrContracts) addContractIndex(contract bchain.AddressDescriptor, idx int) {
+	if acs.contractIndex == nil || acs.contractIndexDirty {
+		return
+	}
+	key, ok := contractIndexKeyFromDesc(contract)
+	if !ok {
+		acs.contractIndexDirty = true
+		return
+	}
+	acs.contractIndex[key] = idx
+}
+
+func (acs *unpackedAddrContracts) markContractIndexDirty() {
+	if acs.contractIndex != nil {
+		acs.contractIndexDirty = true
+	}
 }
 
 func (s *unpackedIds) search(id big.Int) int {
