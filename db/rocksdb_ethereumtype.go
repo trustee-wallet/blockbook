@@ -1603,7 +1603,7 @@ type unpackedAddrContracts struct {
 	contractIndexDirty bool
 }
 
-const addrContractsIndexMinSize = 256
+const addrContractsIndexMinSize = 192
 
 type contractIndexKey [eth.EthereumTypeAddressDescriptorLen]byte
 

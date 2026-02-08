@@ -4,6 +4,7 @@ package db
 
 import (
 	"encoding/hex"
+	"fmt"
 	"math/big"
 	"reflect"
 	"testing"
@@ -1511,6 +1512,47 @@ func Test_packUnpackContractInfo(t *testing.T) {
 			buf := packContractInfo(&tt.contractInfo)
 			if got, err := unpackContractInfo(buf); !reflect.DeepEqual(*got, tt.contractInfo) || err != nil {
 				t.Errorf("packUnpackContractInfo() = %v, want %v, error %v", *got, tt.contractInfo, err)
+			}
+		})
+	}
+}
+
+func Benchmark_contractIndexLookup(b *testing.B) {
+	sizes := []int{192, 256}
+	for _, n := range sizes {
+		contracts := make([]unpackedAddrContract, n)
+		for i := 0; i < n; i++ {
+			contracts[i].Contract = makeTestAddrDesc(i)
+		}
+		target := contracts[n/2].Contract
+
+		b.Run(fmt.Sprintf("ScanHit_%d", n), func(b *testing.B) {
+			b.ReportAllocs()
+			b.ResetTimer()
+			for i := 0; i < b.N; i++ {
+				_, _ = findContractInAddressContracts(target, contracts)
+			}
+		})
+
+		b.Run(fmt.Sprintf("MapHit_%d", n), func(b *testing.B) {
+			acs := &unpackedAddrContracts{Contracts: contracts}
+			// Build once to isolate lookup cost.
+			_, _ = acs.findContractIndex(target)
+			b.ReportAllocs()
+			b.ResetTimer()
+			for i := 0; i < b.N; i++ {
+				_, _ = acs.findContractIndex(target)
+			}
+		})
+
+		b.Run(fmt.Sprintf("MapBuildHit_%d", n), func(b *testing.B) {
+			acs := &unpackedAddrContracts{Contracts: contracts}
+			b.ReportAllocs()
+			b.ResetTimer()
+			for i := 0; i < b.N; i++ {
+				acs.contractIndex = nil
+				acs.contractIndexDirty = false
+				_, _ = acs.findContractIndex(target)
 			}
 		})
 	}
