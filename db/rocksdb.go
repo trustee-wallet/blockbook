@@ -76,6 +76,7 @@ type RocksDB struct {
 	connectBlockMux       sync.Mutex
 	addrContractsCacheMux sync.Mutex
 	addrContractsCache    map[string]*unpackedAddrContracts
+	hotAddrTracker        *addressHotness
 }
 
 const (
@@ -154,8 +155,26 @@ func NewRocksDB(path string, cacheSize, maxOpenFiles int, parser bchain.BlockCha
 	}
 	wo := grocksdb.NewDefaultWriteOptions()
 	ro := grocksdb.NewDefaultReadOptions()
-	r := &RocksDB{path, db, wo, ro, cfh, parser, nil, metrics, c, maxOpenFiles, connectBlockStats{}, extendedIndex, sync.Mutex{}, sync.Mutex{}, make(map[string]*unpackedAddrContracts)}
+	r := &RocksDB{
+		path:                  path,
+		db:                    db,
+		wo:                    wo,
+		ro:                    ro,
+		cfh:                   cfh,
+		chainParser:           parser,
+		is:                    nil,
+		metrics:               metrics,
+		cache:                 c,
+		maxOpenFiles:          maxOpenFiles,
+		cbs:                   connectBlockStats{},
+		extendedIndex:         extendedIndex,
+		connectBlockMux:       sync.Mutex{},
+		addrContractsCacheMux: sync.Mutex{},
+		addrContractsCache:    make(map[string]*unpackedAddrContracts),
+		hotAddrTracker:        nil,
+	}
 	if chainType == bchain.ChainEthereumType {
+		r.hotAddrTracker = newAddressHotnessFromParser(parser)
 		go r.periodicStoreAddrContractsCache()
 	}
 	return r, nil

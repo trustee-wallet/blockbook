@@ -45,42 +45,51 @@ func makeTestAddrDesc(seed int) bchain.AddressDescriptor {
 
 func Test_unpackedAddrContracts_findContractIndex_LazyMap(t *testing.T) {
 	acs := &unpackedAddrContracts{}
-	for i := 0; i < addrContractsIndexMinSize+2; i++ {
+	minContracts := 192
+	for i := 0; i < minContracts+2; i++ {
 		acs.Contracts = append(acs.Contracts, unpackedAddrContract{
 			Contract: makeTestAddrDesc(i),
 		})
 	}
+	addrDesc := makeTestAddrDesc(9999)
 
-	target := acs.Contracts[addrContractsIndexMinSize].Contract
-	idx, found := acs.findContractIndex(target)
-	if !found || idx != addrContractsIndexMinSize {
-		t.Fatalf("findContractIndex() = (%v, %v), want (%v, true)", idx, found, addrContractsIndexMinSize)
+	target := acs.Contracts[minContracts].Contract
+	idx, found := acs.findContractIndex(addrDesc, target, nil)
+	if !found || idx != minContracts {
+		t.Fatalf("findContractIndex() = (%v, %v), want (%v, true)", idx, found, minContracts)
 	}
-	if acs.contractIndex == nil {
-		t.Fatal("expected contract index map to be built")
+	if acs.contractIndex != nil {
+		t.Fatal("did not expect contract index map to be built without hotness")
 	}
 
-	missing := makeTestAddrDesc(addrContractsIndexMinSize + 1024)
+	missing := makeTestAddrDesc(minContracts + 1024)
 	if _, found := findContractInAddressContracts(missing, acs.Contracts); found {
-		missing = makeTestAddrDesc(addrContractsIndexMinSize + 2048)
+		missing = makeTestAddrDesc(minContracts + 2048)
 		if _, found := findContractInAddressContracts(missing, acs.Contracts); found {
 			t.Fatal("failed to generate a missing contract for test")
 		}
 	}
-	if _, found := acs.findContractIndex(missing); found {
+	if _, found := acs.findContractIndex(addrDesc, missing, nil); found {
 		t.Fatal("expected missing contract to be not found")
 	}
 }
 
 func Test_unpackedAddrContracts_findContractIndex_DirtyRebuild(t *testing.T) {
 	acs := &unpackedAddrContracts{}
-	for i := 0; i < addrContractsIndexMinSize+1; i++ {
+	minContracts := 192
+	for i := 0; i < minContracts+1; i++ {
 		acs.Contracts = append(acs.Contracts, unpackedAddrContract{
 			Contract: makeTestAddrDesc(i),
 		})
 	}
+	addrDesc := makeTestAddrDesc(9998)
+	hot := newAddressHotness(minContracts, 4, 1)
+	if hot == nil {
+		t.Fatal("expected hotness tracker to be initialized")
+	}
+	hot.BeginBlock()
 
-	_, _ = acs.findContractIndex(acs.Contracts[0].Contract)
+	_, _ = acs.findContractIndex(addrDesc, acs.Contracts[0].Contract, hot)
 	if acs.contractIndex == nil {
 		t.Fatal("expected contract index map to be built")
 	}
@@ -90,32 +99,69 @@ func Test_unpackedAddrContracts_findContractIndex_DirtyRebuild(t *testing.T) {
 	acs.Contracts = append(acs.Contracts[:1], acs.Contracts[2:]...)
 	acs.markContractIndexDirty()
 
-	if _, found := acs.findContractIndex(removed); found {
+	if _, found := acs.findContractIndex(addrDesc, removed, hot); found {
 		t.Fatal("expected removed contract to be not found after rebuild")
 	}
-	if idx, found := acs.findContractIndex(acs.Contracts[1].Contract); !found || idx != 1 {
+	if idx, found := acs.findContractIndex(addrDesc, acs.Contracts[1].Contract, hot); !found || idx != 1 {
 		t.Fatalf("findContractIndex() = (%v, %v), want (1, true)", idx, found)
 	}
 }
 
 func Test_unpackedAddrContracts_findContractIndex_InvalidLenFallback(t *testing.T) {
 	acs := &unpackedAddrContracts{}
-	for i := 0; i < addrContractsIndexMinSize; i++ {
+	minContracts := 192
+	for i := 0; i < minContracts; i++ {
 		acs.Contracts = append(acs.Contracts, unpackedAddrContract{
 			Contract: makeTestAddrDesc(i),
 		})
 	}
+	addrDesc := makeTestAddrDesc(9997)
+	hot := newAddressHotness(minContracts, 4, 1)
+	if hot == nil {
+		t.Fatal("expected hotness tracker to be initialized")
+	}
+	hot.BeginBlock()
 	invalid := bchain.AddressDescriptor([]byte{1, 2, 3})
 	acs.Contracts = append(acs.Contracts, unpackedAddrContract{Contract: invalid})
 
 	// Build index, which will skip the invalid entry.
-	_, _ = acs.findContractIndex(acs.Contracts[0].Contract)
+	_, _ = acs.findContractIndex(addrDesc, acs.Contracts[0].Contract, hot)
 	if acs.contractIndex == nil {
 		t.Fatal("expected contract index map to be built")
 	}
 
-	if idx, found := acs.findContractIndex(invalid); !found || idx != len(acs.Contracts)-1 {
+	if idx, found := acs.findContractIndex(addrDesc, invalid, hot); !found || idx != len(acs.Contracts)-1 {
 		t.Fatalf("findContractIndex() = (%v, %v), want (%v, true)", idx, found, len(acs.Contracts)-1)
+	}
+}
+
+func Test_unpackedAddrContracts_findContractIndex_HotnessTriggers(t *testing.T) {
+	hotMinContracts := 192
+	hotMinHits := 3
+	hot := newAddressHotness(hotMinContracts, 4, hotMinHits)
+	if hot == nil {
+		t.Fatal("expected hotness tracker to be initialized")
+	}
+	hot.BeginBlock()
+
+	acs := &unpackedAddrContracts{}
+	for i := 0; i < hotMinContracts; i++ {
+		acs.Contracts = append(acs.Contracts, unpackedAddrContract{
+			Contract: makeTestAddrDesc(i),
+		})
+	}
+	addrDesc := makeTestAddrDesc(777)
+	target := acs.Contracts[hotMinContracts/2].Contract
+
+	for i := 0; i < hotMinHits-1; i++ {
+		_, _ = acs.findContractIndex(addrDesc, target, hot)
+		if acs.contractIndex != nil {
+			t.Fatalf("unexpected index build before min hits, hit %d", i+1)
+		}
+	}
+	_, _ = acs.findContractIndex(addrDesc, target, hot)
+	if acs.contractIndex == nil {
+		t.Fatal("expected index to be built after reaching min hits")
 	}
 }
 
@@ -1524,7 +1570,12 @@ func Benchmark_contractIndexLookup(b *testing.B) {
 		for i := 0; i < n; i++ {
 			contracts[i].Contract = makeTestAddrDesc(i)
 		}
+		addrDesc := makeTestAddrDesc(1234)
 		target := contracts[n/2].Contract
+		hot := newAddressHotness(192, 8, 1)
+		if hot != nil {
+			hot.BeginBlock()
+		}
 
 		b.Run(fmt.Sprintf("ScanHit_%d", n), func(b *testing.B) {
 			b.ReportAllocs()
@@ -1537,11 +1588,11 @@ func Benchmark_contractIndexLookup(b *testing.B) {
 		b.Run(fmt.Sprintf("MapHit_%d", n), func(b *testing.B) {
 			acs := &unpackedAddrContracts{Contracts: contracts}
 			// Build once to isolate lookup cost.
-			_, _ = acs.findContractIndex(target)
+			_, _ = acs.findContractIndex(addrDesc, target, hot)
 			b.ReportAllocs()
 			b.ResetTimer()
 			for i := 0; i < b.N; i++ {
-				_, _ = acs.findContractIndex(target)
+				_, _ = acs.findContractIndex(addrDesc, target, hot)
 			}
 		})
 
@@ -1552,7 +1603,7 @@ func Benchmark_contractIndexLookup(b *testing.B) {
 			for i := 0; i < b.N; i++ {
 				acs.contractIndex = nil
 				acs.contractIndexDirty = false
-				_, _ = acs.findContractIndex(target)
+				_, _ = acs.findContractIndex(addrDesc, target, hot)
 			}
 		})
 	}

@@ -22,10 +22,19 @@ const EthereumTypeTxidLen = 32
 // EtherAmountDecimalPoint defines number of decimal points in Ether amounts
 const EtherAmountDecimalPoint = 18
 
+const defaultHotAddressMinContracts = 192
+const defaultHotAddressLRUCacheSize = 20000
+const defaultHotAddressMinHits = 3
+const maxHotAddressLRUCacheSize = 100_000
+const maxHotAddressMinHits = 10
+
 // EthereumParser handle
 type EthereumParser struct {
 	*bchain.BaseParser
-	EnsSuffix string
+	EnsSuffix              string
+	HotAddressMinContracts int
+	HotAddressLRUCacheSize int
+	HotAddressMinHits      int
 }
 
 // NewEthereumParser returns new EthereumParser instance
@@ -36,8 +45,15 @@ func NewEthereumParser(b int, addressAliases bool) *EthereumParser {
 			AmountDecimalPoint:   EtherAmountDecimalPoint,
 			AddressAliases:       addressAliases,
 		},
-		EnsSuffix: ".eth",
+		EnsSuffix:              ".eth",
+		HotAddressMinContracts: defaultHotAddressMinContracts,
+		HotAddressLRUCacheSize: defaultHotAddressLRUCacheSize,
+		HotAddressMinHits:      defaultHotAddressMinHits,
 	}
+}
+
+func (p *EthereumParser) HotAddressConfig() (minContracts, lruSize, minHits int) {
+	return p.HotAddressMinContracts, p.HotAddressLRUCacheSize, p.HotAddressMinHits
 }
 
 type rpcHeader struct {

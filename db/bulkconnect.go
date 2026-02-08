@@ -247,7 +247,11 @@ func (b *BulkConnect) connectBlockBitcoinType(block *bchain.Block, storeBlockTxs
 			return err
 		}
 		if bac > b.bulkAddressesCount {
-			glog.Info("rocksdb: height ", b.height, ", stored ", bac, " addresses, done in ", time.Since(start))
+			suffix := ""
+			if b.d.hotAddrTracker != nil {
+				suffix = b.d.hotAddrTracker.LogSuffix()
+			}
+			glog.Info("rocksdb: height ", b.height, ", stored ", bac, " addresses, done in ", time.Since(start), suffix)
 		}
 	}
 	if storeAddressesChan != nil {
@@ -355,7 +359,11 @@ func (b *BulkConnect) connectBlockEthereumType(block *bchain.Block, storeBlockTx
 			return err
 		}
 		if bac > b.bulkAddressesCount {
-			glog.Info("rocksdb: height ", b.height, ", stored ", bac, " addresses, done in ", time.Since(start))
+			suffix := ""
+			if b.d.hotAddrTracker != nil {
+				suffix = b.d.hotAddrTracker.LogSuffix()
+			}
+			glog.Info("rocksdb: height ", b.height, ", stored ", bac, " addresses, done in ", time.Since(start), suffix)
 		}
 	} else {
 		// if there are blockSpecificData, store them
@@ -422,7 +430,11 @@ func (b *BulkConnect) Close() error {
 	if err := b.d.WriteBatch(wb); err != nil {
 		return err
 	}
-	glog.Info("rocksdb: height ", b.height, ", stored ", bac, " addresses, done in ", time.Since(start))
+	suffix := ""
+	if b.d.hotAddrTracker != nil {
+		suffix = b.d.hotAddrTracker.LogSuffix()
+	}
+	glog.Info("rocksdb: height ", b.height, ", stored ", bac, " addresses, done in ", time.Since(start), suffix)
 	if storeTxAddressesChan != nil {
 		if err := <-storeTxAddressesChan; err != nil {
 			return err

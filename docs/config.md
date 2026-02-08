@@ -95,6 +95,10 @@ Good examples of coin configuration are
         * `mempool_sub_workers` – Number of subworkers for BitcoinType mempool.
         * `block_addresses_to_keep` – Number of blocks that are to be kept in blockaddresses column.
         * `additional_params` – Object of coin-specific params.
+          * Hot-address configuration (Blockbook, Ethereum-type indexing):
+            * `hot_address_min_contracts` – Minimum number of contracts before hotness tracking applies (default **192**).
+            * `hot_address_min_hits` – Lookups within the current block required to mark an address hot (default **3**, clamped to **10**).
+            * `hot_address_lru_cache_size` – Max hot addresses kept in the LRU (default **20000**, clamped to **100,000**).
 
 * `meta` – Common package metadata.
     * `package_maintainer` – Full name of package maintainer.

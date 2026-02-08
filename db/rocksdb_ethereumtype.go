@@ -468,7 +468,7 @@ func (d *RocksDB) addToAddressesAndContractsEthereumType(addrDesc bchain.Address
 		// do not store contracts for 0x0000000000000000000000000000000000000000 address
 		if !isZeroAddress(addrDesc) {
 			// locate the contract and set i to the index in the array of contracts
-			contractIndex, found := ac.findContractIndex(contract)
+			contractIndex, found := ac.findContractIndex(addrDesc, contract, d.hotAddrTracker)
 			if !found {
 				contractIndex = len(ac.Contracts)
 				ac.Contracts = append(ac.Contracts, unpackedAddrContract{
@@ -682,6 +682,9 @@ func (d *RocksDB) processContractTransfers(blockTx *ethBlockTx, tx *bchain.Tx, a
 }
 
 func (d *RocksDB) processAddressesEthereumType(block *bchain.Block, addresses addressesMap, addressContracts map[string]*unpackedAddrContracts) ([]ethBlockTx, error) {
+	if d.hotAddrTracker != nil {
+		d.hotAddrTracker.BeginBlock()
+	}
 	blockTxs := make([]ethBlockTx, len(block.Txs))
 	for txi := range block.Txs {
 		tx := &block.Txs[txi]
@@ -718,6 +721,9 @@ func (d *RocksDB) ReconnectInternalDataToBlockEthereumType(block *bchain.Block) 
 	defer wb.Destroy()
 	if d.chainParser.GetChainType() != bchain.ChainEthereumType {
 		return errors.New("Unsupported chain type")
+	}
+	if d.hotAddrTracker != nil {
+		d.hotAddrTracker.BeginBlock()
 	}
 
 	addresses := make(addressesMap)
@@ -1350,7 +1356,7 @@ func (d *RocksDB) disconnectAddress(btxID []byte, internal bool, addrDesc bchain
 				}
 			}
 		} else {
-			contractIndex, found := addrContracts.findContractIndex(btxContract.contract)
+			contractIndex, found := addrContracts.findContractIndex(addrDesc, btxContract.contract, nil)
 			if found {
 				addrContract := &addrContracts.Contracts[contractIndex]
 				if addrContract.Txs > 0 {
@@ -1603,8 +1609,6 @@ type unpackedAddrContracts struct {
 	contractIndexDirty bool
 }
 
-const addrContractsIndexMinSize = 192
-
 type contractIndexKey [eth.EthereumTypeAddressDescriptorLen]byte
 
 func contractIndexKeyFromDesc(addr bchain.AddressDescriptor) (contractIndexKey, bool) {
@@ -1617,11 +1621,6 @@ func contractIndexKeyFromDesc(addr bchain.AddressDescriptor) (contractIndexKey, 
 }
 
 func (acs *unpackedAddrContracts) rebuildContractIndex() {
-	if len(acs.Contracts) < addrContractsIndexMinSize {
-		acs.contractIndex = nil
-		acs.contractIndexDirty = false
-		return
-	}
 	m := make(map[contractIndexKey]int, len(acs.Contracts))
 	for i := range acs.Contracts {
 		if key, ok := contractIndexKeyFromDesc(acs.Contracts[i].Contract); ok {
@@ -1632,8 +1631,16 @@ func (acs *unpackedAddrContracts) rebuildContractIndex() {
 	acs.contractIndexDirty = false
 }
 
-func (acs *unpackedAddrContracts) findContractIndex(contract bchain.AddressDescriptor) (int, bool) {
-	if len(acs.Contracts) >= addrContractsIndexMinSize {
+func (acs *unpackedAddrContracts) findContractIndex(addrDesc, contract bchain.AddressDescriptor, hot *addressHotness) (int, bool) {
+	useIndex := false
+	if hot != nil && len(acs.Contracts) >= hot.minContracts {
+		// Rule B: use the index only for addresses that are "hot" in this block,
+		// so mid-size lists stay on a cheap linear scan unless we see repeated lookups.
+		if addrKey, ok := addressHotnessKeyFromDesc(addrDesc); ok {
+			useIndex = hot.ShouldUseIndex(addrKey, len(acs.Contracts))
+		}
+	}
+	if useIndex {
 		if acs.contractIndex == nil || acs.contractIndexDirty {
 			acs.rebuildContractIndex()
 		}
