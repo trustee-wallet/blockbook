@@ -76,7 +76,13 @@ type RocksDB struct {
 	connectBlockMux       sync.Mutex
 	addrContractsCacheMux sync.Mutex
 	addrContractsCache    map[string]*unpackedAddrContracts
-	hotAddrTracker        *addressHotness
+	// addrContractsCacheMinSize is the packed size threshold (bytes) before we cache an entry.
+	addrContractsCacheMinSize int
+	// addrContractsCacheMaxBytes is a soft cap; when exceeded we flush and clear the cache.
+	addrContractsCacheMaxBytes int
+	// addrContractsCacheBytes tracks cached size based on the packed size at insertion time.
+	addrContractsCacheBytes int
+	hotAddrTracker          *addressHotness
 }
 
 const (
@@ -156,25 +162,37 @@ func NewRocksDB(path string, cacheSize, maxOpenFiles int, parser bchain.BlockCha
 	wo := grocksdb.NewDefaultWriteOptions()
 	ro := grocksdb.NewDefaultReadOptions()
 	r := &RocksDB{
-		path:                  path,
-		db:                    db,
-		wo:                    wo,
-		ro:                    ro,
-		cfh:                   cfh,
-		chainParser:           parser,
-		is:                    nil,
-		metrics:               metrics,
-		cache:                 c,
-		maxOpenFiles:          maxOpenFiles,
-		cbs:                   connectBlockStats{},
-		extendedIndex:         extendedIndex,
-		connectBlockMux:       sync.Mutex{},
-		addrContractsCacheMux: sync.Mutex{},
-		addrContractsCache:    make(map[string]*unpackedAddrContracts),
-		hotAddrTracker:        nil,
+		path:                       path,
+		db:                         db,
+		wo:                         wo,
+		ro:                         ro,
+		cfh:                        cfh,
+		chainParser:                parser,
+		is:                         nil,
+		metrics:                    metrics,
+		cache:                      c,
+		maxOpenFiles:               maxOpenFiles,
+		cbs:                        connectBlockStats{},
+		extendedIndex:              extendedIndex,
+		connectBlockMux:            sync.Mutex{},
+		addrContractsCacheMux:      sync.Mutex{},
+		addrContractsCache:         make(map[string]*unpackedAddrContracts),
+		addrContractsCacheMinSize:  addrContractsCacheMinSize,
+		addrContractsCacheMaxBytes: 0,
+		addrContractsCacheBytes:    0,
+		hotAddrTracker:             nil,
 	}
 	if chainType == bchain.ChainEthereumType {
 		r.hotAddrTracker = newAddressHotnessFromParser(parser)
+		if cfg, ok := parser.(addressContractsCacheConfigProvider); ok {
+			minSize, maxBytes := cfg.AddressContractsCacheConfig()
+			if minSize > 0 {
+				r.addrContractsCacheMinSize = minSize
+			}
+			if maxBytes > 0 {
+				r.addrContractsCacheMaxBytes = maxBytes
+			}
+		}
 		go r.periodicStoreAddrContractsCache()
 	}
 	return r, nil

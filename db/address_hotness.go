@@ -12,6 +12,10 @@ type hotAddressConfigProvider interface {
 	HotAddressConfig() (minContracts, lruSize, minHits int)
 }
 
+type addressContractsCacheConfigProvider interface {
+	AddressContractsCacheConfig() (minSize, maxBytes int)
+}
+
 type addressHotnessKey [eth.EthereumTypeAddressDescriptorLen]byte
 
 func addressHotnessKeyFromDesc(addr bchain.AddressDescriptor) (addressHotnessKey, bool) {

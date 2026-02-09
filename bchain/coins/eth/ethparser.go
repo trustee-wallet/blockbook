@@ -27,14 +27,18 @@ const defaultHotAddressLRUCacheSize = 20000
 const defaultHotAddressMinHits = 3
 const maxHotAddressLRUCacheSize = 100_000
 const maxHotAddressMinHits = 10
+const defaultAddressContractsCacheMinSize = 300_000
+const defaultAddressContractsCacheMaxBytes = 4_000_000_000
 
 // EthereumParser handle
 type EthereumParser struct {
 	*bchain.BaseParser
-	EnsSuffix              string
-	HotAddressMinContracts int
-	HotAddressLRUCacheSize int
-	HotAddressMinHits      int
+	EnsSuffix                  string
+	HotAddressMinContracts     int
+	HotAddressLRUCacheSize     int
+	HotAddressMinHits          int
+	AddrContractsCacheMinSize  int
+	AddrContractsCacheMaxBytes int
 }
 
 // NewEthereumParser returns new EthereumParser instance
@@ -45,15 +49,21 @@ func NewEthereumParser(b int, addressAliases bool) *EthereumParser {
 			AmountDecimalPoint:   EtherAmountDecimalPoint,
 			AddressAliases:       addressAliases,
 		},
-		EnsSuffix:              ".eth",
-		HotAddressMinContracts: defaultHotAddressMinContracts,
-		HotAddressLRUCacheSize: defaultHotAddressLRUCacheSize,
-		HotAddressMinHits:      defaultHotAddressMinHits,
+		EnsSuffix:                  ".eth",
+		HotAddressMinContracts:     defaultHotAddressMinContracts,
+		HotAddressLRUCacheSize:     defaultHotAddressLRUCacheSize,
+		HotAddressMinHits:          defaultHotAddressMinHits,
+		AddrContractsCacheMinSize:  defaultAddressContractsCacheMinSize,
+		AddrContractsCacheMaxBytes: defaultAddressContractsCacheMaxBytes,
 	}
 }
 
 func (p *EthereumParser) HotAddressConfig() (minContracts, lruSize, minHits int) {
 	return p.HotAddressMinContracts, p.HotAddressLRUCacheSize, p.HotAddressMinHits
+}
+
+func (p *EthereumParser) AddressContractsCacheConfig() (minSize, maxBytes int) {
+	return p.AddrContractsCacheMinSize, p.AddrContractsCacheMaxBytes
 }
 
 type rpcHeader struct {

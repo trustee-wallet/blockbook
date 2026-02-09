@@ -54,6 +54,8 @@ type Configuration struct {
 	HotAddressMinContracts          int    `json:"hot_address_min_contracts,omitempty"`
 	HotAddressLRUCacheSize          int    `json:"hot_address_lru_cache_size,omitempty"`
 	HotAddressMinHits               int    `json:"hot_address_min_hits,omitempty"`
+	AddressContractsCacheMinSize    int    `json:"address_contracts_cache_min_size,omitempty"`
+	AddressContractsCacheMaxBytes   int    `json:"address_contracts_cache_max_bytes,omitempty"`
 	AddressAliases                  bool   `json:"address_aliases,omitempty"`
 	MempoolTxTimeoutHours           int    `json:"mempoolTxTimeoutHours"`
 	QueryBackendOnMempoolResync     bool   `json:"queryBackendOnMempoolResync"`
@@ -130,6 +132,12 @@ func NewEthereumRPC(config json.RawMessage, pushHandler func(bchain.Notification
 		glog.Warningf("hot_address_min_hits=%d is too large, clamping to %d", c.HotAddressMinHits, maxHotAddressMinHits)
 		c.HotAddressMinHits = maxHotAddressMinHits
 	}
+	if c.AddressContractsCacheMinSize <= 0 {
+		c.AddressContractsCacheMinSize = defaultAddressContractsCacheMinSize
+	}
+	if c.AddressContractsCacheMaxBytes <= 0 {
+		c.AddressContractsCacheMaxBytes = defaultAddressContractsCacheMaxBytes
+	}
 
 	s := &EthereumRPC{
 		BaseChain:   &bchain.BaseChain{},
@@ -145,6 +153,8 @@ func NewEthereumRPC(config json.RawMessage, pushHandler func(bchain.Notification
 	s.Parser.HotAddressMinContracts = c.HotAddressMinContracts
 	s.Parser.HotAddressLRUCacheSize = c.HotAddressLRUCacheSize
 	s.Parser.HotAddressMinHits = c.HotAddressMinHits
+	s.Parser.AddrContractsCacheMinSize = c.AddressContractsCacheMinSize
+	s.Parser.AddrContractsCacheMaxBytes = c.AddressContractsCacheMaxBytes
 	s.Timeout = time.Duration(c.RPCTimeout) * time.Second
 	s.PushHandler = pushHandler
 

@@ -1756,10 +1756,27 @@ func (d *RocksDB) getUnpackedAddrDescContracts(addrDesc bchain.AddressDescriptor
 		return nil, nil
 	}
 	rv, err = partiallyUnpackAddrContracts(buf)
-	if err == nil && rv != nil && len(buf) > addrContractsCacheMinSize {
+	minSize := d.addrContractsCacheMinSize
+	if minSize <= 0 {
+		minSize = addrContractsCacheMinSize
+	}
+	if err == nil && rv != nil && len(buf) > minSize {
+		shouldFlush := false
 		d.addrContractsCacheMux.Lock()
-		d.addrContractsCache[string(addrDesc)] = rv
+		key := string(addrDesc)
+		if _, exists := d.addrContractsCache[key]; !exists {
+			d.addrContractsCache[key] = rv
+			// Track bytes based on the packed size at insertion time; later growth isn't accounted for.
+			d.addrContractsCacheBytes += len(buf)
+			if d.addrContractsCacheMaxBytes > 0 && d.addrContractsCacheBytes > d.addrContractsCacheMaxBytes {
+				shouldFlush = true
+			}
+		}
 		d.addrContractsCacheMux.Unlock()
+		if shouldFlush {
+			// Flush early when we exceed the cap to avoid unbounded memory growth.
+			d.flushAddrContractsCache()
+		}
 	}
 	return rv, err
 }
@@ -1911,6 +1928,32 @@ func (d *RocksDB) writeContractsCache() {
 	if err := d.WriteBatch(wb); err != nil {
 		glog.Error("writeContractsCache: failed to store addrContractsCache: ", err)
 	}
+}
+
+func (d *RocksDB) writeContractsCacheSnapshot(cache map[string]*unpackedAddrContracts) {
+	wb := grocksdb.NewWriteBatch()
+	defer wb.Destroy()
+	for addrDesc, acs := range cache {
+		buf := packUnpackedAddrContracts(acs)
+		wb.PutCF(d.cfh[cfAddressContracts], bchain.AddressDescriptor(addrDesc), buf)
+	}
+	if err := d.WriteBatch(wb); err != nil {
+		glog.Error("writeContractsCache: failed to store addrContractsCache: ", err)
+	}
+}
+
+func (d *RocksDB) flushAddrContractsCache() {
+	start := time.Now()
+	d.addrContractsCacheMux.Lock()
+	cache := d.addrContractsCache
+	count := len(cache)
+	d.addrContractsCache = make(map[string]*unpackedAddrContracts)
+	d.addrContractsCacheBytes = 0
+	d.addrContractsCacheMux.Unlock()
+	if count > 0 {
+		d.writeContractsCacheSnapshot(cache)
+	}
+	glog.Info("storeAddrContractsCache: store ", count, " entries in ", time.Since(start))
 }
 
 func (d *RocksDB) storeAddrContractsCache() {

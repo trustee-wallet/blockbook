@@ -165,6 +165,54 @@ func Test_unpackedAddrContracts_findContractIndex_HotnessTriggers(t *testing.T) 
 	}
 }
 
+func Test_addrContractsCache_FlushOnCap(t *testing.T) {
+	d := setupRocksDB(t, &testEthereumParser{
+		EthereumParser: ethereumTestnetParser(),
+	})
+	defer closeAndDestroyRocksDB(t, d)
+
+	d.addrContractsCacheMinSize = 1
+	d.addrContractsCacheMaxBytes = 10
+
+	addrDesc := makeTestAddrDesc(42)
+	acs := &unpackedAddrContracts{
+		TotalTxs: 1,
+		Contracts: []unpackedAddrContract{
+			{
+				Contract: makeTestAddrDesc(7),
+				Standard: bchain.FungibleToken,
+				Txs:      1,
+				Value:    unpackedBigInt{Value: big.NewInt(0)},
+			},
+		},
+	}
+	buf := packUnpackedAddrContracts(acs)
+	if len(buf) <= d.addrContractsCacheMaxBytes {
+		t.Fatalf("expected packed size to exceed cap, got %d", len(buf))
+	}
+	wb := grocksdb.NewWriteBatch()
+	wb.PutCF(d.cfh[cfAddressContracts], addrDesc, buf)
+	if err := d.WriteBatch(wb); err != nil {
+		wb.Destroy()
+		t.Fatal(err)
+	}
+	wb.Destroy()
+
+	got, err := d.getUnpackedAddrDescContracts(addrDesc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got == nil {
+		t.Fatal("expected cached address contracts to be returned")
+	}
+	if len(d.addrContractsCache) != 0 {
+		t.Fatalf("expected cache to be flushed, got %d entries", len(d.addrContractsCache))
+	}
+	if d.addrContractsCacheBytes != 0 {
+		t.Fatalf("expected cache bytes to be reset, got %d", d.addrContractsCacheBytes)
+	}
+}
+
 func verifyAfterEthereumTypeBlock1(t *testing.T, d *RocksDB, afterDisconnect bool) {
 	if err := checkColumn(d, cfHeight, []keyPair{
 		{
