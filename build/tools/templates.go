@@ -193,7 +193,7 @@ func readCoinAlias(path string) (string, error) {
 }
 
 func rpcEnvPrefixes() []string {
-	return []string{"BB_RPC_URL_WS_", "BB_RPC_URL_", "BB_RPC_BIND_HOST_", "BB_RPC_ALLOW_IP_"}
+	return []string{"BB_RPC_URL_WS_", "BB_RPC_URL_HTTP_", "BB_RPC_BIND_HOST_", "BB_RPC_ALLOW_IP_"}
 }
 
 func collectUnknownRPCEnvVars(validAliases map[string]struct{}, prefixes []string) []string {
@@ -299,7 +299,7 @@ func LoadConfig(configsDir, coin string) (*Config, error) {
 		config.Env.RPCAllowIP = allowIP
 	}
 
-	rpcURLKey := "BB_RPC_URL_" + config.Coin.Alias // Use alias so env naming matches coin config and deployment conventions.
+	rpcURLKey := "BB_RPC_URL_HTTP_" + config.Coin.Alias // Use alias so env naming matches coin config and deployment conventions.
 	if rpcURL, ok := os.LookupEnv(rpcURLKey); ok && rpcURL != "" {
 		// Prefer explicit env override so package generation/tests can target hosted RPC endpoints without editing JSON.
 		config.IPC.RPCURLTemplate = rpcURL

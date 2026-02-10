@@ -12,7 +12,7 @@ import (
 func TestLoadBlockchainCfgEnvOverride(t *testing.T) {
 	const wantHTTP = "http://backend_hostname:1234"
 	const wantWS = "ws://backend_hostname:1234"
-	t.Setenv("BB_RPC_URL_ethereum", wantHTTP)
+	t.Setenv("BB_RPC_URL_HTTP_ethereum", wantHTTP)
 	t.Setenv("BB_RPC_URL_WS_ethereum", wantWS)
 
 	cfg := bchain.LoadBlockchainCfg(t, "ethereum")

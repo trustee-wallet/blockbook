@@ -348,6 +348,11 @@ func (c *blockChainWithMetrics) EthereumTypeGetErc20ContractBalance(addrDesc, co
 	return c.b.EthereumTypeGetErc20ContractBalance(addrDesc, contractDesc)
 }
 
+func (c *blockChainWithMetrics) EthereumTypeGetErc20ContractBalances(addrDesc bchain.AddressDescriptor, contractDescs []bchain.AddressDescriptor) (v []*big.Int, err error) {
+	defer func(s time.Time) { c.observeRPCLatency("EthereumTypeGetErc20ContractBalances", s, err) }(time.Now())
+	return c.b.EthereumTypeGetErc20ContractBalances(addrDesc, contractDescs)
+}
+
 // GetTokenURI returns URI of non fungible or multi token defined by token id
 func (c *blockChainWithMetrics) GetTokenURI(contractDesc bchain.AddressDescriptor, tokenID *big.Int) (v string, err error) {
 	defer func(s time.Time) { c.observeRPCLatency("GetTokenURI", s, err) }(time.Now())

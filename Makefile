@@ -8,7 +8,7 @@ TCMALLOC =
 PORTABLE = 0
 ARGS ?=
 # Forward BB_RPC_* overrides into Docker so template generation sees desired endpoints/binds/allow lists.
-BB_RPC_ENV := $(shell env | awk -F= '/^BB_RPC_(URL|URL_WS|BIND_HOST|ALLOW_IP)_/ {print "-e " $$1}')
+BB_RPC_ENV := $(shell env | awk -F= '/^BB_RPC_(URL_HTTP|URL_WS|BIND_HOST|ALLOW_IP)_/ {print "-e " $$1}')
 
 TARGETS=$(subst .json,, $(shell ls configs/coins))
 
@@ -25,6 +25,9 @@ test: .bin-image
 
 test-integration: .bin-image
 	docker run -t --rm -e PACKAGER=$(PACKAGER) $(BB_RPC_ENV) -v "$(CURDIR):/src" --network="host" $(BIN_IMAGE) make test-integration ARGS="$(ARGS)"
+
+test-connectivity: .bin-image
+	docker run -t --rm -e PACKAGER=$(PACKAGER) $(BB_RPC_ENV) -v "$(CURDIR):/src" --network="host" $(BIN_IMAGE) make test-connectivity ARGS="$(ARGS)"
 
 test-all: .bin-image
 	docker run -t --rm -e PACKAGER=$(PACKAGER) $(BB_RPC_ENV) -v "$(CURDIR):/src" --network="host" $(BIN_IMAGE) make test-all ARGS="$(ARGS)"

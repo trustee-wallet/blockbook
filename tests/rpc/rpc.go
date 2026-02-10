@@ -12,8 +12,10 @@ import (
 	"time"
 
 	mapset "github.com/deckarep/golang-set"
+	"github.com/ethereum/go-ethereum/common"
 	"github.com/juju/errors"
 	"github.com/trezor/blockbook/bchain"
+	"github.com/trezor/blockbook/bchain/coins/eth"
 )
 
 var testMap = map[string]func(t *testing.T, th *TestHandler){
@@ -27,21 +29,31 @@ var testMap = map[string]func(t *testing.T, th *TestHandler){
 	"GetBestBlockHash":         testGetBestBlockHash,
 	"GetBestBlockHeight":       testGetBestBlockHeight,
 	"GetBlockHeader":           testGetBlockHeader,
+	"EthCallBatch":             testEthCallBatch,
 }
 
 type TestHandler struct {
+	Coin     string
 	Chain    bchain.BlockChain
 	Mempool  bchain.Mempool
 	TestData *TestData
 }
 
+type EthCallBatchData struct {
+	Address         string   `json:"address"`
+	Contracts       []string `json:"contracts"`
+	BatchSize       int      `json:"batchSize,omitempty"`
+	SkipUnavailable bool     `json:"skipUnavailable,omitempty"`
+}
+
 type TestData struct {
-	BlockHeight uint32                `json:"blockHeight"`
-	BlockHash   string                `json:"blockHash"`
-	BlockTime   int64                 `json:"blockTime"`
-	BlockSize   int                   `json:"blockSize"`
-	BlockTxs    []string              `json:"blockTxs"`
-	TxDetails   map[string]*bchain.Tx `json:"txDetails"`
+	BlockHeight  uint32                `json:"blockHeight"`
+	BlockHash    string                `json:"blockHash"`
+	BlockTime    int64                 `json:"blockTime"`
+	BlockSize    int                   `json:"blockSize"`
+	BlockTxs     []string              `json:"blockTxs"`
+	TxDetails    map[string]*bchain.Tx `json:"txDetails"`
+	EthCallBatch *EthCallBatchData     `json:"ethCallBatch,omitempty"`
 }
 
 func IntegrationTest(t *testing.T, coin string, chain bchain.BlockChain, mempool bchain.Mempool, testConfig json.RawMessage) {
@@ -57,6 +69,7 @@ func IntegrationTest(t *testing.T, coin string, chain bchain.BlockChain, mempool
 	}
 
 	h := TestHandler{
+		Coin:     coin,
 		Chain:    chain,
 		Mempool:  mempool,
 		TestData: td,
@@ -191,6 +204,8 @@ func testGetTransactionForMempool(t *testing.T, h *TestHandler) {
 	for txid, want := range h.TestData.TxDetails {
 		// reset fields that are not parsed by BlockChainParser
 		want.Confirmations, want.Blocktime, want.Time, want.CoinSpecificData = 0, 0, 0, nil
+		// Mempool endpoints may or may not include segwit witness; keep comparisons backend-agnostic.
+		stripWitness(want)
 
 		got, err := h.Chain.GetTransactionForMempool(txid)
 		if err != nil {
@@ -202,6 +217,7 @@ func testGetTransactionForMempool(t *testing.T, h *TestHandler) {
 
 		// transactions parsed from JSON may contain additional data
 		got.Confirmations, got.Blocktime, got.Time, got.CoinSpecificData = 0, 0, 0, nil
+		stripWitness(got)
 		if !reflect.DeepEqual(got, want) {
 			t.Errorf("GetTransactionForMempool() got %+#v, want %+#v", got, want)
 		}
@@ -232,6 +248,12 @@ func normalizeAddresses(tx *bchain.Tx, parser bchain.BlockChainParser) {
 				}
 			}
 		}
+	}
+}
+
+func stripWitness(tx *bchain.Tx) {
+	for i := range tx.Vin {
+		tx.Vin[i].Witness = nil
 	}
 }
 
@@ -321,6 +343,10 @@ func testGetBestBlockHash(t *testing.T, h *TestHandler) {
 		}
 		hh, err := h.Chain.GetBlockHash(height)
 		if err != nil {
+			if err == bchain.ErrBlockNotFound {
+				time.Sleep(time.Millisecond * 100)
+				continue
+			}
 			t.Fatal(err)
 		}
 		if hash != hh {
@@ -383,6 +409,39 @@ func testGetBlockHeader(t *testing.T, h *TestHandler) {
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("GetBlockHeader() got=%+#v, want=%+#v", got, want)
 	}
+}
+
+func testEthCallBatch(t *testing.T, h *TestHandler) {
+	data := h.TestData.EthCallBatch
+	if data == nil {
+		t.Fatal("ethCallBatch fixture missing")
+	}
+	if data.Address == "" {
+		t.Fatal("ethCallBatch.address missing")
+	}
+	if len(data.Contracts) == 0 {
+		t.Fatal("ethCallBatch.contracts missing")
+	}
+
+	cfg := bchain.LoadBlockchainCfg(t, h.Coin)
+	contracts := make([]common.Address, 0, len(data.Contracts))
+	for _, contract := range data.Contracts {
+		if contract == "" {
+			t.Fatal("ethCallBatch contract address missing")
+		}
+		contracts = append(contracts, common.HexToAddress(contract))
+	}
+
+	bchain.RunERC20BatchBalanceTest(t, bchain.ERC20BatchCase{
+		Name:            h.Coin,
+		RPCURL:          cfg.RpcUrl,
+		RPCURLWS:        cfg.RpcUrlWs,
+		Addr:            common.HexToAddress(data.Address),
+		Contracts:       contracts,
+		BatchSize:       data.BatchSize,
+		SkipUnavailable: data.SkipUnavailable,
+		NewClient:       eth.NewERC20BatchIntegrationClient,
+	})
 }
 
 func getMempool(t *testing.T, h *TestHandler) []string {
