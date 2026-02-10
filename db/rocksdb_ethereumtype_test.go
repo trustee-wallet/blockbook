@@ -1435,6 +1435,39 @@ func Test_addToContracts(t *testing.T) {
 	}
 }
 
+func Test_addToContract_ERC20ZeroesExistingValue(t *testing.T) {
+	transfer := &bchain.TokenTransfer{
+		Standard: bchain.FungibleToken,
+		Value:    *big.NewInt(1),
+	}
+
+	c := &unpackedAddrContract{
+		Standard: bchain.FungibleToken,
+		Contract: makeTestAddrDesc(123),
+		Value:    unpackedBigInt{Value: big.NewInt(123456)},
+	}
+	addToContract(c, 0, 1, c.Contract, transfer, false)
+	if c.Value.Value == nil || c.Value.Value.Sign() != 0 {
+		t.Fatalf("expected ERC20 value to be zeroed, got %v", c.Value.Value)
+	}
+	if len(c.Value.Slice) != 0 {
+		t.Fatalf("expected ERC20 packed slice to be cleared, got %d bytes", len(c.Value.Slice))
+	}
+
+	c = &unpackedAddrContract{
+		Standard: bchain.FungibleToken,
+		Contract: makeTestAddrDesc(124),
+		Value:    unpackedBigInt{Slice: []byte{0x1, 0x2}},
+	}
+	addToContract(c, 0, 1, c.Contract, transfer, false)
+	if c.Value.Value == nil || c.Value.Value.Sign() != 0 {
+		t.Fatalf("expected ERC20 value to be zeroed after slice, got %v", c.Value.Value)
+	}
+	if len(c.Value.Slice) != 0 {
+		t.Fatalf("expected ERC20 packed slice to be cleared, got %d bytes", len(c.Value.Slice))
+	}
+}
+
 func Test_packUnpackBlockTx(t *testing.T) {
 	parser := ethereumTestnetParser()
 	tests := []struct {
