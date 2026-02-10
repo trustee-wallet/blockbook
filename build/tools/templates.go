@@ -77,16 +77,17 @@ type Config struct {
 		ExplorerURL             string `json:"explorer_url"`
 		AdditionalParams        string `json:"additional_params"`
 		BlockChain              struct {
-			Parse                 bool   `json:"parse,omitempty"`
-			Subversion            string `json:"subversion,omitempty"`
-			AddressFormat         string `json:"address_format,omitempty"`
-			MempoolWorkers        int    `json:"mempool_workers"`
-			MempoolSubWorkers     int    `json:"mempool_sub_workers"`
-			BlockAddressesToKeep  int    `json:"block_addresses_to_keep"`
-			XPubMagic             uint32 `json:"xpub_magic,omitempty"`
-			XPubMagicSegwitP2sh   uint32 `json:"xpub_magic_segwit_p2sh,omitempty"`
-			XPubMagicSegwitNative uint32 `json:"xpub_magic_segwit_native,omitempty"`
-			Slip44                uint32 `json:"slip44,omitempty"`
+			Parse                  bool   `json:"parse,omitempty"`
+			Subversion             string `json:"subversion,omitempty"`
+			AddressFormat          string `json:"address_format,omitempty"`
+			MempoolWorkers         int    `json:"mempool_workers"`
+			MempoolSubWorkers      int    `json:"mempool_sub_workers"`
+			MempoolResyncBatchSize int    `json:"mempool_resync_batch_size,omitempty"`
+			BlockAddressesToKeep   int    `json:"block_addresses_to_keep"`
+			XPubMagic              uint32 `json:"xpub_magic,omitempty"`
+			XPubMagicSegwitP2sh    uint32 `json:"xpub_magic_segwit_p2sh,omitempty"`
+			XPubMagicSegwitNative  uint32 `json:"xpub_magic_segwit_native,omitempty"`
+			Slip44                 uint32 `json:"slip44,omitempty"`
 
 			AdditionalParams map[string]json.RawMessage `json:"additional_params"`
 		} `json:"block_chain"`

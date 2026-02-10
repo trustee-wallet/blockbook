@@ -299,6 +299,11 @@ type OnNewTxFunc func(tx *MempoolTx)
 // AddrDescForOutpointFunc returns address descriptor and value for given outpoint or nil if outpoint not found
 type AddrDescForOutpointFunc func(outpoint Outpoint) (AddressDescriptor, *big.Int)
 
+// MempoolBatcher allows batch fetching of mempool transactions when supported.
+type MempoolBatcher interface {
+	GetRawTransactionsForMempoolBatch(txids []string) (map[string]*Tx, error)
+}
+
 // BlockChain defines common interface to block chain daemon
 type BlockChain interface {
 	// life-cycle methods

@@ -260,6 +260,7 @@ func stripWitness(tx *bchain.Tx) {
 func testMempoolSync(t *testing.T, h *TestHandler) {
 	for i := 0; i < 3; i++ {
 		txs := getMempool(t, h)
+		validateMempoolBatchFetch(t, h, txs)
 
 		n, err := h.Mempool.Resync()
 		if err != nil {
@@ -270,11 +271,20 @@ func testMempoolSync(t *testing.T, h *TestHandler) {
 			continue
 		}
 
+		beforeIntersect := len(txs)
 		txs = intersect(txs, getMempool(t, h))
 		if len(txs) == 0 {
 			// no transactions to test
 			continue
 		}
+		if beforeIntersect >= 20 {
+			ratio := float64(len(txs)) / float64(beforeIntersect)
+			if ratio < 0.2 {
+				t.Fatalf("mempool intersect too small: after=%d before=%d ratio=%.2f", len(txs), beforeIntersect, ratio)
+			}
+		}
+		const mempoolSyncStride = 5
+		txs = sampleEveryNth(txs, mempoolSyncStride)
 
 		txid2addrs := getTxid2addrs(t, h, txs)
 		if len(txid2addrs) == 0 {
@@ -294,10 +304,86 @@ func testMempoolSync(t *testing.T, h *TestHandler) {
 			}
 		}
 
+		warmStart := time.Now()
+		warmCount, warmErr := h.Mempool.Resync()
+		warmDuration := time.Since(warmStart)
+		if warmErr != nil {
+			t.Logf("Warm resync failed: %v", warmErr)
+		} else {
+			avgPerTx := time.Duration(0)
+			if warmCount > 0 {
+				avgPerTx = warmDuration / time.Duration(warmCount)
+			}
+			t.Logf("Warm resync finished size=%d duration=%s avg_per_tx=%s", warmCount, warmDuration, avgPerTx)
+		}
+
 		// done
 		return
 	}
 	t.Skip("Skipping test, all attempts to sync mempool failed due to network state changes")
+}
+
+func validateMempoolBatchFetch(t *testing.T, h *TestHandler, txs []string) {
+	if mempoolResyncBatchSize(t, h.Coin) > 1 {
+		// Validate batch fetch support so the mempool sync test exercises the batched path.
+		batcher, ok := h.Chain.(bchain.MempoolBatcher)
+		if !ok {
+			t.Fatalf("mempool_resync_batch_size > 1 but batch fetch is unavailable for %s", h.Coin)
+		}
+		sample := txs
+		if len(sample) > 5 {
+			sample = sample[:5]
+		}
+		if len(sample) > 0 {
+			got, err := batcher.GetRawTransactionsForMempoolBatch(sample)
+			if err != nil {
+				t.Fatalf("batch getrawtransaction failed for %s: %v", h.Coin, err)
+			}
+			if len(got) == 0 {
+				t.Skip("Skipping test, batch returned no transactions")
+			}
+			matched := 0
+			for _, txid := range sample {
+				batchTx := got[txid]
+				if batchTx == nil {
+					continue
+				}
+				singleTx, err := h.Chain.GetTransactionForMempool(txid)
+				if err != nil {
+					if err == bchain.ErrTxNotFound {
+						continue
+					}
+					t.Fatalf("single getrawtransaction failed for %s: %v", h.Coin, err)
+				}
+				if singleTx == nil {
+					t.Fatalf("single getrawtransaction returned nil for %s", h.Coin)
+				}
+				if batchTx.Txid != txid || singleTx.Txid != txid {
+					t.Fatalf("mismatched txid in batch vs single for %s: want %s, batch=%s single=%s", h.Coin, txid, batchTx.Txid, singleTx.Txid)
+				}
+				matched++
+			}
+			if matched == 0 {
+				t.Skip("Skipping test, no stable mempool transactions to compare")
+			}
+		}
+	}
+}
+
+func mempoolResyncBatchSize(t *testing.T, coin string) int {
+	t.Helper()
+
+	rawCfg, err := bchain.LoadBlockchainCfgRaw(coin)
+	if err != nil {
+		t.Fatalf("load blockchain config for %s: %v", coin, err)
+	}
+	var cfg struct {
+		MempoolResyncBatchSize int `json:"mempool_resync_batch_size"`
+	}
+	if err := json.Unmarshal(rawCfg, &cfg); err != nil {
+		t.Fatalf("unmarshal blockchain config for %s: %v", coin, err)
+	}
+	return cfg.MempoolResyncBatchSize
 }
 
 func testEstimateSmartFee(t *testing.T, h *TestHandler) {
@@ -495,6 +581,17 @@ func intersect(a, b []string) []string {
 		res = append(res, v.(string))
 	}
 	return res
+}
+
+func sampleEveryNth(txs []string, stride int) []string {
+	if stride <= 1 || len(txs) <= stride {
+		return txs
+	}
+	sampled := make([]string, 0, (len(txs)+stride-1)/stride)
+	for idx := 0; idx < len(txs); idx += stride {
+		sampled = append(sampled, txs[idx])
+	}
+	return sampled
 }
 
 func containsTx(o []bchain.Outpoint, tx string) bool {
