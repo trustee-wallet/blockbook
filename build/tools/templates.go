@@ -10,6 +10,8 @@ import (
 	"path/filepath"
 	"reflect"
 	"runtime"
+	"sort"
+	"strings"
 	"text/template"
 	"time"
 )
@@ -100,6 +102,8 @@ type Config struct {
 		BlockbookInstallPath string `json:"blockbook_install_path"`
 		BlockbookDataPath    string `json:"blockbook_data_path"`
 		Architecture         string `json:"architecture"`
+		RPCBindHost          string `json:"-"` // Derived from BB_RPC_BIND_HOST_* to keep default RPC exposure local.
+		RPCAllowIP           string `json:"-"` // Derived to align rpcallowip with RPC bind host intent.
 	} `json:"-"`
 }
 
@@ -120,6 +124,71 @@ func generateRPCAuth(user, pass string) (string, error) {
 		return "", err
 	}
 	return out.String(), nil
+}
+
+func validateRPCEnvVars(configsDir string) error {
+	// Use config filenames as the source of truth so typos fail before templating.
+	validAliases, err := loadCoinAliases(configsDir)
+	if err != nil {
+		return err
+	}
+	unknown := collectUnknownRPCEnvVars(validAliases, rpcEnvPrefixes())
+	if len(unknown) == 0 {
+		return nil
+	}
+	sort.Strings(unknown)
+	return fmt.Errorf("BB_RPC_* env vars reference unknown coin aliases: %s", strings.Join(unknown, ", "))
+}
+
+func loadCoinAliases(configsDir string) (map[string]struct{}, error) {
+	coinsDir := filepath.Join(configsDir, "coins")
+	entries, err := os.ReadDir(coinsDir)
+	if err != nil {
+		return nil, fmt.Errorf("read coins directory for BB_RPC_* validation: %w", err)
+	}
+
+	validAliases := make(map[string]struct{}, len(entries))
+	for _, entry := range entries {
+		if entry.IsDir() {
+			continue
+		}
+		name := entry.Name()
+		if !strings.HasSuffix(name, ".json") {
+			continue
+		}
+		alias := strings.TrimSuffix(name, ".json")
+		if alias != "" {
+			validAliases[alias] = struct{}{}
+		}
+	}
+
+	return validAliases, nil
+}
+
+func rpcEnvPrefixes() []string {
+	return []string{"BB_RPC_URL_", "BB_RPC_BIND_HOST_", "BB_RPC_ALLOW_IP_"}
+}
+
+func collectUnknownRPCEnvVars(validAliases map[string]struct{}, prefixes []string) []string {
+	var unknown []string
+	for _, env := range os.Environ() {
+		key, _, _ := strings.Cut(env, "=")
+		for _, prefix := range prefixes {
+			if !strings.HasPrefix(key, prefix) {
+				continue
+			}
+			alias := strings.TrimPrefix(key, prefix)
+			if alias == "" {
+				unknown = append(unknown, fmt.Sprintf("(empty alias from %s)", key)) // Empty suffix is always invalid.
+				break
+			}
+			if _, ok := validAliases[alias]; !ok {
+				unknown = append(unknown, fmt.Sprintf("%s (from %s)", alias, key))
+			}
+			break
+		}
+	}
+	return unknown
 }
 
 // ParseTemplate parses the template
@@ -163,6 +232,11 @@ func copyNonZeroBackendFields(toValue *Backend, fromValue *Backend) {
 func LoadConfig(configsDir, coin string) (*Config, error) {
 	config := new(Config)
 
+	// Fail fast if BB_RPC_* variables reference coins that do not exist in configs/coins.
+	if err := validateRPCEnvVars(configsDir); err != nil {
+		return nil, err
+	}
+
 	f, err := os.Open(filepath.Join(configsDir, "coins", coin+".json"))
 	if err != nil {
 		return nil, err
@@ -185,6 +259,23 @@ func LoadConfig(configsDir, coin string) (*Config, error) {
 
 	config.Meta.BuildDatetime = time.Now().Format("Mon, 02 Jan 2006 15:04:05 -0700")
 	config.Env.Architecture = runtime.GOARCH
+
+	rpcBindKey := "BB_RPC_BIND_HOST_" + config.Coin.Alias // Bind host is per coin alias to match deployment naming.
+	config.Env.RPCBindHost = "127.0.0.1"                  // Default to localhost to avoid unintended remote exposure.
+	if bindHost, ok := os.LookupEnv(rpcBindKey); ok && bindHost != "" {
+		config.Env.RPCBindHost = bindHost
+	}
+	rpcAllowKey := "BB_RPC_ALLOW_IP_" + config.Coin.Alias // Allow list defaults to loopback unless explicitly overridden.
+	config.Env.RPCAllowIP = "127.0.0.1"
+	if allowIP, ok := os.LookupEnv(rpcAllowKey); ok && allowIP != "" {
+		config.Env.RPCAllowIP = allowIP
+	}
+
+	rpcURLKey := "BB_RPC_URL_" + config.Coin.Alias // Use alias so env naming matches coin config and deployment conventions.
+	if rpcURL, ok := os.LookupEnv(rpcURLKey); ok && rpcURL != "" {
+		// Prefer explicit env override so package generation/tests can target hosted RPC endpoints without editing JSON.
+		config.IPC.RPCURLTemplate = rpcURL
+	}
 
 	if !isEmpty(config, "backend") {
 		// set platform specific fields to config
