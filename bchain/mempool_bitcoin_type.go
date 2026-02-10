@@ -456,26 +456,26 @@ func (m *MempoolBitcoinType) Resync() (count int, err error) {
 		if mempoolSize > 0 {
 			avgPerTx = totalDuration / time.Duration(mempoolSize)
 		}
+		var cacheHits uint64
+		var cacheMisses uint64
+		var cacheHitRate float64
 		if cache := m.getResyncOutpointCache(); cache != nil {
 			outpointCacheEntries = cache.len()
+			cacheHits, cacheMisses = cache.stats()
+			total := cacheHits + cacheMisses
+			if total > 0 {
+				cacheHitRate = float64(cacheHits) / float64(total)
+			}
 		}
 		listDurationRounded := roundDuration(listDuration, time.Millisecond)
 		processDurationRounded := roundDuration(processDuration, time.Millisecond)
 		totalDurationRounded := roundDuration(totalDuration, time.Millisecond)
 		avgPerTxRounded := roundDuration(avgPerTx, time.Microsecond)
+		hitRateText := fmt.Sprintf("%.3f", cacheHitRate)
 		if err != nil {
-			glog.Warning("mempool: resync failed size=", mempoolSize, " missing=", missingCount, " outpoint_cache_entries=", outpointCacheEntries, " batch_size=", batchSize, " batch_workers=", batchWorkers, " list_duration=", listDurationRounded, " process_duration=", processDurationRounded, " duration=", totalDurationRounded, " avg_per_tx=", avgPerTxRounded, " err=", err)
+			glog.Warning("mempool: resync failed size=", mempoolSize, " missing=", missingCount, " outpoint_cache_entries=", outpointCacheEntries, " outpoint_cache_hits=", cacheHits, " outpoint_cache_misses=", cacheMisses, " outpoint_cache_hit_rate=", hitRateText, " batch_size=", batchSize, " batch_workers=", batchWorkers, " list_duration=", listDurationRounded, " process_duration=", processDurationRounded, " duration=", totalDurationRounded, " avg_per_tx=", avgPerTxRounded, " err=", err)
 		} else {
-			glog.Info("mempool: resync finished size=", mempoolSize, " missing=", missingCount, " outpoint_cache_entries=", outpointCacheEntries, " batch_size=", batchSize, " batch_workers=", batchWorkers, " list_duration=", listDurationRounded, " process_duration=", processDurationRounded, " duration=", totalDurationRounded, " avg_per_tx=", avgPerTxRounded)
-		}
-		if cache := m.getResyncOutpointCache(); cache != nil {
-			hits, misses := cache.stats()
-			total := hits + misses
-			hitRate := 0.0
-			if total > 0 {
-				hitRate = float64(hits) / float64(total)
-			}
-			glog.Info("mempool: resync outpoint cache hits=", hits, " misses=", misses, " hit_rate=", fmt.Sprintf("%.3f", hitRate))
+			glog.Info("mempool: resync finished size=", mempoolSize, " missing=", missingCount, " outpoint_cache_entries=", outpointCacheEntries, " outpoint_cache_hits=", cacheHits, " outpoint_cache_misses=", cacheMisses, " outpoint_cache_hit_rate=", hitRateText, " batch_size=", batchSize, " batch_workers=", batchWorkers, " list_duration=", listDurationRounded, " process_duration=", processDurationRounded, " duration=", totalDurationRounded, " avg_per_tx=", avgPerTxRounded)
 		}
 		m.resyncOutpoints.Store((*resyncOutpointCache)(nil))
 	}()
