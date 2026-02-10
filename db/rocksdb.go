@@ -79,9 +79,9 @@ type RocksDB struct {
 	// addrContractsCacheMinSize is the packed size threshold (bytes) before we cache an entry.
 	addrContractsCacheMinSize int
 	// addrContractsCacheMaxBytes is a soft cap; when exceeded we flush and clear the cache.
-	addrContractsCacheMaxBytes int
+	addrContractsCacheMaxBytes int64
 	// addrContractsCacheBytes tracks cached size based on the packed size at insertion time.
-	addrContractsCacheBytes int
+	addrContractsCacheBytes int64
 	hotAddrTracker          *addressHotness
 }
 

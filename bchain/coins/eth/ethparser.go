@@ -28,7 +28,7 @@ const defaultHotAddressMinHits = 3
 const maxHotAddressLRUCacheSize = 100_000
 const maxHotAddressMinHits = 10
 const defaultAddressContractsCacheMinSize = 300_000
-const defaultAddressContractsCacheMaxBytes = 4_000_000_000
+const defaultAddressContractsCacheMaxBytes int64 = 4_000_000_000
 
 // EthereumParser handle
 type EthereumParser struct {
@@ -38,7 +38,7 @@ type EthereumParser struct {
 	HotAddressLRUCacheSize     int
 	HotAddressMinHits          int
 	AddrContractsCacheMinSize  int
-	AddrContractsCacheMaxBytes int
+	AddrContractsCacheMaxBytes int64
 }
 
 // NewEthereumParser returns new EthereumParser instance
@@ -62,7 +62,7 @@ func (p *EthereumParser) HotAddressConfig() (minContracts, lruSize, minHits int)
 	return p.HotAddressMinContracts, p.HotAddressLRUCacheSize, p.HotAddressMinHits
 }
 
-func (p *EthereumParser) AddressContractsCacheConfig() (minSize, maxBytes int) {
+func (p *EthereumParser) AddressContractsCacheConfig() (minSize int, maxBytes int64) {
 	return p.AddrContractsCacheMinSize, p.AddrContractsCacheMaxBytes
 }
 

@@ -1773,7 +1773,7 @@ func (d *RocksDB) getUnpackedAddrDescContracts(addrDesc bchain.AddressDescriptor
 		if _, exists := d.addrContractsCache[key]; !exists {
 			d.addrContractsCache[key] = rv
 			// Track bytes based on the packed size at insertion time; later growth isn't accounted for.
-			d.addrContractsCacheBytes += len(buf)
+			d.addrContractsCacheBytes += int64(len(buf))
 			if d.addrContractsCacheMaxBytes > 0 && d.addrContractsCacheBytes > d.addrContractsCacheMaxBytes {
 				shouldFlush = true
 			}

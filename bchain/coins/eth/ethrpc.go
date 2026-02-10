@@ -55,7 +55,7 @@ type Configuration struct {
 	HotAddressLRUCacheSize          int    `json:"hot_address_lru_cache_size,omitempty"`
 	HotAddressMinHits               int    `json:"hot_address_min_hits,omitempty"`
 	AddressContractsCacheMinSize    int    `json:"address_contracts_cache_min_size,omitempty"`
-	AddressContractsCacheMaxBytes   int    `json:"address_contracts_cache_max_bytes,omitempty"`
+	AddressContractsCacheMaxBytes   int64  `json:"address_contracts_cache_max_bytes,omitempty"`
 	AddressAliases                  bool   `json:"address_aliases,omitempty"`
 	MempoolTxTimeoutHours           int    `json:"mempoolTxTimeoutHours"`
 	QueryBackendOnMempoolResync     bool   `json:"queryBackendOnMempoolResync"`

@@ -187,7 +187,7 @@ func Test_addrContractsCache_FlushOnCap(t *testing.T) {
 		},
 	}
 	buf := packUnpackedAddrContracts(acs)
-	if len(buf) <= d.addrContractsCacheMaxBytes {
+	if int64(len(buf)) <= d.addrContractsCacheMaxBytes {
 		t.Fatalf("expected packed size to exceed cap, got %d", len(buf))
 	}
 	wb := grocksdb.NewWriteBatch()
