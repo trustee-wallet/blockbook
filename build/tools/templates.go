@@ -62,6 +62,7 @@ type Config struct {
 	} `json:"ports"`
 	IPC struct {
 		RPCURLTemplate              string `json:"rpc_url_template"`
+		RPCURLWSTemplate            string `json:"rpc_url_ws_template"`
 		RPCUser                     string `json:"rpc_user"`
 		RPCPass                     string `json:"rpc_pass"`
 		RPCTimeout                  int    `json:"rpc_timeout"`
@@ -127,7 +128,7 @@ func generateRPCAuth(user, pass string) (string, error) {
 }
 
 func validateRPCEnvVars(configsDir string) error {
-	// Use config filenames as the source of truth so typos fail before templating.
+	// Use coin aliases as the source of truth so env naming matches coin config and deployment conventions.
 	validAliases, err := loadCoinAliases(configsDir)
 	if err != nil {
 		return err
@@ -138,6 +139,12 @@ func validateRPCEnvVars(configsDir string) error {
 	}
 	sort.Strings(unknown)
 	return fmt.Errorf("BB_RPC_* env vars reference unknown coin aliases: %s", strings.Join(unknown, ", "))
+}
+
+type coinAliasHolder struct {
+	Coin struct {
+		Alias string `json:"alias"`
+	} `json:"coin"`
 }
 
 func loadCoinAliases(configsDir string) (map[string]struct{}, error) {
@@ -156,7 +163,13 @@ func loadCoinAliases(configsDir string) (map[string]struct{}, error) {
 		if !strings.HasSuffix(name, ".json") {
 			continue
 		}
-		alias := strings.TrimSuffix(name, ".json")
+		alias, err := readCoinAlias(filepath.Join(coinsDir, name))
+		if err != nil {
+			return nil, err
+		}
+		if alias == "" {
+			alias = strings.TrimSuffix(name, ".json")
+		}
 		if alias != "" {
 			validAliases[alias] = struct{}{}
 		}
@@ -165,8 +178,22 @@ func loadCoinAliases(configsDir string) (map[string]struct{}, error) {
 	return validAliases, nil
 }
 
+func readCoinAlias(path string) (string, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return "", fmt.Errorf("read coin alias from %s: %w", path, err)
+	}
+	defer f.Close()
+
+	var holder coinAliasHolder
+	if err := json.NewDecoder(f).Decode(&holder); err != nil {
+		return "", fmt.Errorf("decode coin alias from %s: %w", path, err)
+	}
+	return holder.Coin.Alias, nil
+}
+
 func rpcEnvPrefixes() []string {
-	return []string{"BB_RPC_URL_", "BB_RPC_BIND_HOST_", "BB_RPC_ALLOW_IP_"}
+	return []string{"BB_RPC_URL_WS_", "BB_RPC_URL_", "BB_RPC_BIND_HOST_", "BB_RPC_ALLOW_IP_"}
 }
 
 func collectUnknownRPCEnvVars(validAliases map[string]struct{}, prefixes []string) []string {
@@ -195,6 +222,7 @@ func collectUnknownRPCEnvVars(validAliases map[string]struct{}, prefixes []strin
 func (c *Config) ParseTemplate() *template.Template {
 	templates := map[string]string{
 		"IPC.RPCURLTemplate":                      c.IPC.RPCURLTemplate,
+		"IPC.RPCURLWSTemplate":                    c.IPC.RPCURLWSTemplate,
 		"IPC.MessageQueueBindingTemplate":         c.IPC.MessageQueueBindingTemplate,
 		"Backend.ExecCommandTemplate":             c.Backend.ExecCommandTemplate,
 		"Backend.LogrotateFilesTemplate":          c.Backend.LogrotateFilesTemplate,
@@ -275,6 +303,10 @@ func LoadConfig(configsDir, coin string) (*Config, error) {
 	if rpcURL, ok := os.LookupEnv(rpcURLKey); ok && rpcURL != "" {
 		// Prefer explicit env override so package generation/tests can target hosted RPC endpoints without editing JSON.
 		config.IPC.RPCURLTemplate = rpcURL
+	}
+	rpcURLWSKey := "BB_RPC_URL_WS_" + config.Coin.Alias
+	if rpcURLWS, ok := os.LookupEnv(rpcURLWSKey); ok && rpcURLWS != "" {
+		config.IPC.RPCURLWSTemplate = rpcURLWS
 	}
 
 	if !isEmpty(config, "backend") {

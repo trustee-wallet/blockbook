@@ -12,7 +12,8 @@
         "blockbook_public": 9199
     },
     "ipc": {
-        "rpc_url_template": "ws://127.0.0.1:{{.Ports.BackendRPC}}/ext/bc/C/ws",
+        "rpc_url_template": "http://127.0.0.1:{{.Ports.BackendRPC}}/ext/bc/C/rpc",
+        "rpc_url_ws_template": "ws://127.0.0.1:{{.Ports.BackendRPC}}/ext/bc/C/ws",
         "rpc_timeout": 25
     },
     "backend": {

@@ -89,9 +89,14 @@ command: `make NO_CACHE=true all-bitcoin`.
 `PORTABLE`: By default, the RocksDB binaries shipped with Blockbook are optimized for the platform you're compiling on (-march=native or the equivalent). If you want to build a portable binary, use `make PORTABLE=1 all-bitcoin`.
 
 `BB_RPC_URL_<coin alias>`: Overrides `ipc.rpc_url_template` while generating package definitions so you can target
-hosted RPC endpoints without editing coin JSON. The root `Makefile` forwards any `BB_RPC_URL_*` variables into the
-Docker build/test containers. Example:
-`BB_RPC_URL_ethereum_archive=ws://backend_hostname:1234 make deb-ethereum_archive`.
+hosted HTTP RPC endpoints without editing coin JSON. The root `Makefile` forwards any `BB_RPC_URL_*` variables into the
+Docker build/test containers.
+
+`BB_RPC_URL_WS_<coin alias>`: Overrides `ipc.rpc_url_ws_template` for WebSocket subscriptions. It should point to the
+same host as `BB_RPC_URL_<coin alias>`.
+
+Example:
+`BB_RPC_URL_ethereum=http://backend_hostname:1234 BB_RPC_URL_WS_ethereum_archive=ws://backend_hostname:1234 make deb-ethereum_archive`.
 
 `BB_RPC_BIND_HOST_<coin alias>`: Overrides backend RPC bind host during package generation. Defaults to `127.0.0.1`
 to avoid unintended exposure. Example: `BB_RPC_BIND_HOST_ethereum=0.0.0.0 make deb-ethereum`.

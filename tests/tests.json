@@ -1,6 +1,7 @@
 {
     "avalanche": {
-        "rpc": ["GetBlock", "GetBlockHash", "GetTransaction", "EstimateFee", "GetBlockHeader"]
+        "rpc": ["GetBlock", "GetBlockHash", "GetTransaction", "EstimateFee", "GetBlockHeader"],
+        "evm_connectivity": true
     },
     "bcash": {
         "rpc": ["GetBlock", "GetBlockHash", "GetTransaction", "GetTransactionForMempool", "MempoolSync",
@@ -51,7 +52,8 @@
         "sync": ["ConnectBlocksParallel", "ConnectBlocks", "HandleFork"]
     },
     "bsc": {
-        "rpc": ["GetBlock", "GetBlockHash", "GetTransaction", "EstimateFee", "GetBlockHeader"]
+        "rpc": ["GetBlock", "GetBlockHash", "GetTransaction", "EstimateFee", "GetBlockHeader"],
+        "evm_connectivity": true
     },
     "bsc_archive": {
         "rpc": ["GetBlock", "GetBlockHash", "GetTransaction", "EstimateFee", "GetBlockHeader"]
@@ -249,5 +251,20 @@
         "rpc":  ["GetBlock", "GetBlockHash", "GetTransaction", "GetTransactionForMempool", "MempoolSync",
                  "EstimateFee", "GetBestBlockHash", "GetBestBlockHeight", "GetBlockHeader"],
         "sync": ["ConnectBlocksParallel", "ConnectBlocks", "HandleFork"]
+    },
+    "arbitrum": {
+        "evm_connectivity": true
+    },
+    "base": {
+        "evm_connectivity": true
+    },
+    "ethereum": {
+        "evm_connectivity": true
+    },
+    "optimism": {
+        "evm_connectivity": true
+    },
+    "polygon": {
+        "evm_connectivity": true
     }
 }

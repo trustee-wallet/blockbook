@@ -11,6 +11,7 @@
     "network": "{{.Coin.Network}}",{{end}}
     "coin_label": "{{.Coin.Label}}",
     "rpc_url": "{{template "IPC.RPCURLTemplate" .}}",
+    "rpc_url_ws": "{{template "IPC.RPCURLWSTemplate" .}}",
     "rpc_user": "{{.IPC.RPCUser}}",
     "rpc_pass": "{{.IPC.RPCPass}}",
     "rpc_timeout": {{.IPC.RPCTimeout}},

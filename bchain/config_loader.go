@@ -17,43 +17,22 @@ import (
 // BlockchainCfg contains fields read from blockbook's blockchaincfg.json after being rendered from templates.
 type BlockchainCfg struct {
 	// more fields can be added later as needed
-	RpcUrl string `json:"rpc_url"`
+	RpcUrl   string `json:"rpc_url"`
+	RpcUrlWs string `json:"rpc_url_ws"`
 }
 
 // LoadBlockchainCfg returns the resolved blockchaincfg.json (env overrides are honored in tests)
 func LoadBlockchainCfg(t *testing.T, coinAlias string) BlockchainCfg {
 	t.Helper()
 
-	configsDir, err := repoConfigsDir()
+	rawCfg, err := loadBlockchainCfgBytes(coinAlias)
 	if err != nil {
-		t.Fatalf("integration config path error: %v", err)
-	}
-	templatesDir, err := repoTemplatesDir(configsDir)
-	if err != nil {
-		t.Fatalf("integration templates path error: %v", err)
+		t.Fatalf("%v", err)
 	}
 
-	config, err := buildcfg.LoadConfig(configsDir, coinAlias)
-	if err != nil {
-		t.Fatalf("load config for %s: %v", coinAlias, err)
-	}
-
-	outputDir, err := os.MkdirTemp("", "integration_blockchaincfg")
-	if err != nil {
-		t.Fatalf("integration temp dir error: %v", err)
-	}
-	t.Cleanup(func() {
-		_ = os.RemoveAll(outputDir)
-	})
-
-	// Render templates so tests read the same generated blockchaincfg.json as packaging.
-	if err := buildcfg.GeneratePackageDefinitions(config, templatesDir, outputDir); err != nil {
-		t.Fatalf("generate package definitions for %s: %v", coinAlias, err)
-	}
-
-	blockchainCfg, err := readBlockchainCfg(filepath.Join(outputDir, "blockbook", "blockchaincfg.json"))
-	if err != nil {
-		t.Fatalf("read blockchain config for %s: %v", coinAlias, err)
+	var blockchainCfg BlockchainCfg
+	if err := json.Unmarshal(rawCfg, &blockchainCfg); err != nil {
+		t.Fatalf("unmarshal blockchain config for %s: %v", coinAlias, err)
 	}
 	if blockchainCfg.RpcUrl == "" {
 		t.Fatalf("empty rpc_url for %s", coinAlias)
@@ -61,17 +40,49 @@ func LoadBlockchainCfg(t *testing.T, coinAlias string) BlockchainCfg {
 	return blockchainCfg
 }
 
-// readBlockchainCfg loads the rendered blockchain config for test assertions.
-func readBlockchainCfg(path string) (BlockchainCfg, error) {
-	b, err := os.ReadFile(path)
+// LoadBlockchainCfgRaw returns the rendered blockchaincfg.json payload for integration tests.
+func LoadBlockchainCfgRaw(coinAlias string) (json.RawMessage, error) {
+	rawCfg, err := loadBlockchainCfgBytes(coinAlias)
 	if err != nil {
-		return BlockchainCfg{}, err
+		return nil, err
 	}
-	var cfg BlockchainCfg
-	if err := json.Unmarshal(b, &cfg); err != nil {
-		return BlockchainCfg{}, err
+	return json.RawMessage(rawCfg), nil
+}
+
+func loadBlockchainCfgBytes(coinAlias string) ([]byte, error) {
+	configsDir, err := repoConfigsDir()
+	if err != nil {
+		return nil, fmt.Errorf("integration config path error: %w", err)
 	}
-	return cfg, nil
+	templatesDir, err := repoTemplatesDir(configsDir)
+	if err != nil {
+		return nil, fmt.Errorf("integration templates path error: %w", err)
+	}
+
+	config, err := buildcfg.LoadConfig(configsDir, coinAlias)
+	if err != nil {
+		return nil, fmt.Errorf("load config for %s: %w", coinAlias, err)
+	}
+
+	outputDir, err := os.MkdirTemp("", "integration_blockchaincfg")
+	if err != nil {
+		return nil, fmt.Errorf("integration temp dir error: %w", err)
+	}
+	defer func() {
+		_ = os.RemoveAll(outputDir)
+	}()
+
+	// Render templates so tests read the same generated blockchaincfg.json as packaging.
+	if err := buildcfg.GeneratePackageDefinitions(config, templatesDir, outputDir); err != nil {
+		return nil, fmt.Errorf("generate package definitions for %s: %w", coinAlias, err)
+	}
+
+	blockchainCfgPath := filepath.Join(outputDir, "blockbook", "blockchaincfg.json")
+	rawCfg, err := os.ReadFile(blockchainCfgPath)
+	if err != nil {
+		return nil, fmt.Errorf("read blockchain config for %s: %w", coinAlias, err)
+	}
+	return rawCfg, nil
 }
 
 // repoTemplatesDir locates build/templates relative to the repo root.
