@@ -1928,7 +1928,10 @@ func (d *RocksDB) storeUnpackedAddressContracts(wb *grocksdb.WriteBatch, acm map
 			wb.DeleteCF(d.cfh[cfAddressContracts], bchain.AddressDescriptor(addrDesc))
 		} else {
 			// do not store large address contracts found in cache
-			if _, found := d.addrContractsCache[addrDesc]; !found {
+			d.addrContractsCacheMux.Lock()
+			_, found := d.addrContractsCache[addrDesc]
+			d.addrContractsCacheMux.Unlock()
+			if !found {
 				buf := packUnpackedAddrContracts(acs)
 				wb.PutCF(d.cfh[cfAddressContracts], bchain.AddressDescriptor(addrDesc), buf)
 			}
