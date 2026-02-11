@@ -389,6 +389,12 @@ func (d *RocksDB) ConnectBlock(block *bchain.Block) error {
 	wb := grocksdb.NewWriteBatch()
 	defer wb.Destroy()
 
+	var tipTxs uint64
+	var tipTokenTransfers uint64
+	var tipInternalTransfers uint64
+	var tipVin uint64
+	var tipVout uint64
+
 	if glog.V(2) {
 		glog.Infof("rocksdb: insert %d %s", block.Height, block.Hash)
 	}
@@ -412,6 +418,13 @@ func (d *RocksDB) ConnectBlock(block *bchain.Block) error {
 		if err := d.processAddressesBitcoinType(block, addresses, txAddressesMap, balances, gf); err != nil {
 			return err
 		}
+		if d.metrics != nil {
+			tipTxs = uint64(len(block.Txs))
+			for i := range block.Txs {
+				tipVin += uint64(len(block.Txs[i].Vin))
+				tipVout += uint64(len(block.Txs[i].Vout))
+			}
+		}
 		if err := d.storeTxAddresses(wb, txAddressesMap); err != nil {
 			return err
 		}
@@ -432,6 +445,15 @@ func (d *RocksDB) ConnectBlock(block *bchain.Block) error {
 		blockTxs, err := d.processAddressesEthereumType(block, addresses, addressContracts)
 		if err != nil {
 			return err
+		}
+		if d.metrics != nil {
+			for i := range blockTxs {
+				tipTokenTransfers += uint64(len(blockTxs[i].contracts))
+				if blockTxs[i].internalData != nil {
+					tipInternalTransfers += uint64(len(blockTxs[i].internalData.transfers))
+				}
+			}
+			tipTxs = uint64(len(blockTxs))
 		}
 		if err := d.storeUnpackedAddressContracts(wb, addressContracts); err != nil {
 			return err
@@ -457,6 +479,24 @@ func (d *RocksDB) ConnectBlock(block *bchain.Block) error {
 	avg := d.is.SetBlockTime(block.Height, uint32(block.Time))
 	if d.metrics != nil {
 		d.metrics.AvgBlockPeriod.Set(float64(avg))
+	}
+	if d.metrics != nil {
+		if chainType == bchain.ChainBitcoinType {
+			d.metrics.SyncBlockStats.With(common.Labels{"scope": "tip", "kind": "txs"}).Set(float64(tipTxs))
+			d.metrics.SyncBlockStats.With(common.Labels{"scope": "tip", "kind": "vin"}).Set(float64(tipVin))
+			d.metrics.SyncBlockStats.With(common.Labels{"scope": "tip", "kind": "vout"}).Set(float64(tipVout))
+		} else if chainType == bchain.ChainEthereumType {
+			d.metrics.SyncBlockStats.With(common.Labels{"scope": "tip", "kind": "txs"}).Set(float64(tipTxs))
+			d.metrics.SyncBlockStats.With(common.Labels{"scope": "tip", "kind": "token_transfers"}).Set(float64(tipTokenTransfers))
+			d.metrics.SyncBlockStats.With(common.Labels{"scope": "tip", "kind": "internal_transfers"}).Set(float64(tipInternalTransfers))
+			if d.hotAddrTracker != nil {
+				eligible, hits, promotions, evictions := d.hotAddrTracker.Stats()
+				d.metrics.SyncHotnessStats.With(common.Labels{"scope": "tip", "kind": "eligible_lookups"}).Set(float64(eligible))
+				d.metrics.SyncHotnessStats.With(common.Labels{"scope": "tip", "kind": "lru_hits"}).Set(float64(hits))
+				d.metrics.SyncHotnessStats.With(common.Labels{"scope": "tip", "kind": "promotions"}).Set(float64(promotions))
+				d.metrics.SyncHotnessStats.With(common.Labels{"scope": "tip", "kind": "evictions"}).Set(float64(evictions))
+			}
+		}
 	}
 	return nil
 }

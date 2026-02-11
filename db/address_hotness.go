@@ -122,6 +122,13 @@ func (h *addressHotness) LogSuffix() string {
 		h.blockEligibleLookups, h.blockLRUHits, h.blockPromotions, h.blockEvictions, hitRate)
 }
 
+func (h *addressHotness) Stats() (eligible, hits, promotions, evictions uint64) {
+	if h == nil {
+		return 0, 0, 0, 0
+	}
+	return h.blockEligibleLookups, h.blockLRUHits, h.blockPromotions, h.blockEvictions
+}
+
 type hotAddressLRU struct {
 	capacity int
 	order    *list.List

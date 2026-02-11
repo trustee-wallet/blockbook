@@ -8,34 +8,41 @@ import (
 
 // Metrics holds prometheus collectors for various metrics collected by Blockbook
 type Metrics struct {
-	SocketIORequests         *prometheus.CounterVec
-	SocketIOSubscribes       *prometheus.CounterVec
-	SocketIOClients          prometheus.Gauge
-	SocketIOReqDuration      *prometheus.HistogramVec
-	WebsocketRequests        *prometheus.CounterVec
-	WebsocketSubscribes      *prometheus.GaugeVec
-	WebsocketClients         prometheus.Gauge
-	WebsocketReqDuration     *prometheus.HistogramVec
-	IndexResyncDuration      prometheus.Histogram
-	MempoolResyncDuration    prometheus.Histogram
-	TxCacheEfficiency        *prometheus.CounterVec
-	RPCLatency               *prometheus.HistogramVec
-	IndexResyncErrors        *prometheus.CounterVec
-	IndexDBSize              prometheus.Gauge
-	ExplorerViews            *prometheus.CounterVec
-	MempoolSize              prometheus.Gauge
-	EstimatedFee             *prometheus.GaugeVec
-	AvgBlockPeriod           prometheus.Gauge
-	DbColumnRows             *prometheus.GaugeVec
-	DbColumnSize             *prometheus.GaugeVec
-	BlockbookAppInfo         *prometheus.GaugeVec
-	BackendBestHeight        prometheus.Gauge
-	BlockbookBestHeight      prometheus.Gauge
-	ExplorerPendingRequests  *prometheus.GaugeVec
-	WebsocketPendingRequests *prometheus.GaugeVec
-	SocketIOPendingRequests  *prometheus.GaugeVec
-	XPubCacheSize            prometheus.Gauge
-	CoingeckoRequests        *prometheus.CounterVec
+	SocketIORequests          *prometheus.CounterVec
+	SocketIOSubscribes        *prometheus.CounterVec
+	SocketIOClients           prometheus.Gauge
+	SocketIOReqDuration       *prometheus.HistogramVec
+	WebsocketRequests         *prometheus.CounterVec
+	WebsocketSubscribes       *prometheus.GaugeVec
+	WebsocketClients          prometheus.Gauge
+	WebsocketReqDuration      *prometheus.HistogramVec
+	IndexResyncDuration       prometheus.Histogram
+	MempoolResyncDuration     prometheus.Histogram
+	TxCacheEfficiency         *prometheus.CounterVec
+	RPCLatency                *prometheus.HistogramVec
+	IndexResyncErrors         *prometheus.CounterVec
+	IndexDBSize               prometheus.Gauge
+	ExplorerViews             *prometheus.CounterVec
+	MempoolSize               prometheus.Gauge
+	EstimatedFee              *prometheus.GaugeVec
+	AvgBlockPeriod            prometheus.Gauge
+	SyncBlockStats            *prometheus.GaugeVec
+	SyncHotnessStats          *prometheus.GaugeVec
+	AddrContractsCacheEntries prometheus.Gauge
+	AddrContractsCacheBytes   prometheus.Gauge
+	AddrContractsCacheHits    prometheus.Counter
+	AddrContractsCacheMisses  prometheus.Counter
+	AddrContractsCacheFlushes *prometheus.CounterVec
+	DbColumnRows              *prometheus.GaugeVec
+	DbColumnSize              *prometheus.GaugeVec
+	BlockbookAppInfo          *prometheus.GaugeVec
+	BackendBestHeight         prometheus.Gauge
+	BlockbookBestHeight       prometheus.Gauge
+	ExplorerPendingRequests   *prometheus.GaugeVec
+	WebsocketPendingRequests  *prometheus.GaugeVec
+	SocketIOPendingRequests   *prometheus.GaugeVec
+	XPubCacheSize             prometheus.Gauge
+	CoingeckoRequests         *prometheus.CounterVec
 }
 
 // Labels represents a collection of label name -> value mappings.
@@ -186,6 +193,58 @@ func GetMetrics(coin string) (*Metrics, error) {
 			Help:        "Average period of mining of last 100 blocks in seconds",
 			ConstLabels: Labels{"coin": coin},
 		},
+	)
+	metrics.SyncBlockStats = prometheus.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Name:        "blockbook_sync_block_stats",
+			Help:        "Per-interval block stats for bulk sync and per-block stats at chain tip",
+			ConstLabels: Labels{"coin": coin},
+		},
+		[]string{"scope", "kind"},
+	)
+	metrics.SyncHotnessStats = prometheus.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Name:        "blockbook_sync_hotness_stats",
+			Help:        "Hot address stats for bulk sync intervals and per-block chain tip processing (Ethereum-type only)",
+			ConstLabels: Labels{"coin": coin},
+		},
+		[]string{"scope", "kind"},
+	)
+	metrics.AddrContractsCacheEntries = prometheus.NewGauge(
+		prometheus.GaugeOpts{
+			Name:        "blockbook_addr_contracts_cache_entries",
+			Help:        "Number of cached addressContracts entries",
+			ConstLabels: Labels{"coin": coin},
+		},
+	)
+	metrics.AddrContractsCacheBytes = prometheus.NewGauge(
+		prometheus.GaugeOpts{
+			Name:        "blockbook_addr_contracts_cache_bytes",
+			Help:        "Estimated bytes in the addressContracts cache",
+			ConstLabels: Labels{"coin": coin},
+		},
+	)
+	metrics.AddrContractsCacheHits = prometheus.NewCounter(
+		prometheus.CounterOpts{
+			Name:        "blockbook_addr_contracts_cache_hits_total",
+			Help:        "Total number of addressContracts cache hits",
+			ConstLabels: Labels{"coin": coin},
+		},
+	)
+	metrics.AddrContractsCacheMisses = prometheus.NewCounter(
+		prometheus.CounterOpts{
+			Name:        "blockbook_addr_contracts_cache_misses_total",
+			Help:        "Total number of addressContracts cache misses",
+			ConstLabels: Labels{"coin": coin},
+		},
+	)
+	metrics.AddrContractsCacheFlushes = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name:        "blockbook_addr_contracts_cache_flush_total",
+			Help:        "Total number of addressContracts cache flushes by reason",
+			ConstLabels: Labels{"coin": coin},
+		},
+		[]string{"reason"},
 	)
 	metrics.DbColumnRows = prometheus.NewGaugeVec(
 		prometheus.GaugeOpts{

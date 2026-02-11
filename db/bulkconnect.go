@@ -7,6 +7,7 @@ import (
 	"github.com/golang/glog"
 	"github.com/linxGnu/grocksdb"
 	"github.com/trezor/blockbook/bchain"
+	"github.com/trezor/blockbook/common"
 )
 
 // bulk connect
@@ -33,6 +34,7 @@ type BulkConnect struct {
 	addressContracts   map[string]*unpackedAddrContracts
 	height             uint32
 	bulkStats          bulkConnectStats
+	bulkHotness        bulkHotnessStats
 }
 
 const (
@@ -47,11 +49,19 @@ const (
 )
 
 type bulkConnectStats struct {
+	blocks            uint64
 	txs               uint64
 	tokenTransfers    uint64
 	internalTransfers uint64
 	vin               uint64
 	vout              uint64
+}
+
+type bulkHotnessStats struct {
+	eligible   uint64
+	hits       uint64
+	promotions uint64
+	evictions  uint64
 }
 
 // InitBulkConnect initializes bulk connect and switches DB to inconsistent state
@@ -194,6 +204,7 @@ func (b *BulkConnect) storeBulkBlockFilters(wb *grocksdb.WriteBatch) error {
 }
 
 func (b *BulkConnect) addEthereumStats(blockTxs []ethBlockTx) {
+	b.bulkStats.blocks++
 	b.bulkStats.txs += uint64(len(blockTxs))
 	for i := range blockTxs {
 		b.bulkStats.tokenTransfers += uint64(len(blockTxs[i].contracts))
@@ -201,14 +212,38 @@ func (b *BulkConnect) addEthereumStats(blockTxs []ethBlockTx) {
 			b.bulkStats.internalTransfers += uint64(len(blockTxs[i].internalData.transfers))
 		}
 	}
+	if b.d.hotAddrTracker != nil {
+		eligible, hits, promotions, evictions := b.d.hotAddrTracker.Stats()
+		b.bulkHotness.eligible += eligible
+		b.bulkHotness.hits += hits
+		b.bulkHotness.promotions += promotions
+		b.bulkHotness.evictions += evictions
+	}
 }
 
 func (b *BulkConnect) addBitcoinStats(block *bchain.Block) {
+	b.bulkStats.blocks++
 	b.bulkStats.txs += uint64(len(block.Txs))
 	for i := range block.Txs {
 		b.bulkStats.vin += uint64(len(block.Txs[i].Vin))
 		b.bulkStats.vout += uint64(len(block.Txs[i].Vout))
 	}
+}
+
+func (b *BulkConnect) updateSyncMetrics(scope string) {
+	if b.d.metrics == nil {
+		return
+	}
+	b.d.metrics.SyncBlockStats.With(common.Labels{"scope": scope, "kind": "blocks"}).Set(float64(b.bulkStats.blocks))
+	b.d.metrics.SyncBlockStats.With(common.Labels{"scope": scope, "kind": "txs"}).Set(float64(b.bulkStats.txs))
+	b.d.metrics.SyncBlockStats.With(common.Labels{"scope": scope, "kind": "token_transfers"}).Set(float64(b.bulkStats.tokenTransfers))
+	b.d.metrics.SyncBlockStats.With(common.Labels{"scope": scope, "kind": "internal_transfers"}).Set(float64(b.bulkStats.internalTransfers))
+	b.d.metrics.SyncBlockStats.With(common.Labels{"scope": scope, "kind": "vin"}).Set(float64(b.bulkStats.vin))
+	b.d.metrics.SyncBlockStats.With(common.Labels{"scope": scope, "kind": "vout"}).Set(float64(b.bulkStats.vout))
+	b.d.metrics.SyncHotnessStats.With(common.Labels{"scope": scope, "kind": "eligible_lookups"}).Set(float64(b.bulkHotness.eligible))
+	b.d.metrics.SyncHotnessStats.With(common.Labels{"scope": scope, "kind": "lru_hits"}).Set(float64(b.bulkHotness.hits))
+	b.d.metrics.SyncHotnessStats.With(common.Labels{"scope": scope, "kind": "promotions"}).Set(float64(b.bulkHotness.promotions))
+	b.d.metrics.SyncHotnessStats.With(common.Labels{"scope": scope, "kind": "evictions"}).Set(float64(b.bulkHotness.evictions))
 }
 
 func (b *BulkConnect) statsLogSuffix() string {
@@ -231,6 +266,7 @@ func (b *BulkConnect) statsLogSuffix() string {
 
 func (b *BulkConnect) resetStats() {
 	b.bulkStats = bulkConnectStats{}
+	b.bulkHotness = bulkHotnessStats{}
 }
 
 func (b *BulkConnect) connectBlockBitcoinType(block *bchain.Block, storeBlockTxs bool) error {
@@ -303,6 +339,7 @@ func (b *BulkConnect) connectBlockBitcoinType(block *bchain.Block, storeBlockTxs
 				suffix += b.d.hotAddrTracker.LogSuffix()
 			}
 			glog.Info("rocksdb: height ", b.height, ", stored ", bac, " addresses, done in ", time.Since(start), suffix)
+			b.updateSyncMetrics("bulk")
 			b.resetStats()
 		}
 	}
@@ -417,6 +454,7 @@ func (b *BulkConnect) connectBlockEthereumType(block *bchain.Block, storeBlockTx
 				suffix += b.d.hotAddrTracker.LogSuffix()
 			}
 			glog.Info("rocksdb: height ", b.height, ", stored ", bac, " addresses, done in ", time.Since(start), suffix)
+			b.updateSyncMetrics("bulk")
 			b.resetStats()
 		}
 	} else {
@@ -489,6 +527,7 @@ func (b *BulkConnect) Close() error {
 		suffix += b.d.hotAddrTracker.LogSuffix()
 	}
 	glog.Info("rocksdb: height ", b.height, ", stored ", bac, " addresses, done in ", time.Since(start), suffix)
+	b.updateSyncMetrics("bulk")
 	b.resetStats()
 	if storeTxAddressesChan != nil {
 		if err := <-storeTxAddressesChan; err != nil {
