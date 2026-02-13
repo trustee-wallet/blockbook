@@ -290,12 +290,14 @@ func (b *EthereumRPC) EthereumTypeRpcCallAtBlock(data, to, from string, blockNum
 		args["from"] = from
 	}
 
+	b.observeEthCall("single", 1)
 	ctx, cancel := context.WithTimeout(context.Background(), b.Timeout)
 	defer cancel()
 	var r string
 	blockArg := bchain.ToBlockNumArg(blockNumber)
 	err := b.RPC.CallContext(ctx, &r, "eth_call", args, blockArg)
 	if err != nil {
+		b.observeEthCallError("single", "rpc")
 		return "", err
 	}
 	return r, nil
@@ -373,6 +375,7 @@ func (b *EthereumRPC) EthereumTypeGetErc20ContractBalanceAtBlock(addrDesc, contr
 	}
 	r := parseSimpleNumericProperty(data)
 	if r == nil {
+		b.observeEthCallError("single", "invalid")
 		return nil, errors.New("Invalid balance")
 	}
 	return r, nil
@@ -445,14 +448,18 @@ func (b *EthereumRPC) erc20BalancesBatchAtBlock(batcher batchCaller, callData st
 			Result: &results[i],
 		}
 	}
+	b.observeEthCall("batch", len(contractDescs))
+	b.observeEthCallBatch(len(contractDescs))
 	ctx, cancel := context.WithTimeout(context.Background(), b.Timeout)
 	defer cancel()
 	if err := batcher.BatchCallContext(ctx, batch); err != nil {
+		b.observeEthCallError("batch", "rpc")
 		return nil, err
 	}
 	balances := make([]*big.Int, len(contractDescs))
 	for i := range batch {
 		if batch[i].Error != nil {
+			b.observeEthCallError("batch", "elem")
 			glog.Warningf("erc20 batch eth_call failed for %s: %v", hexutil.Encode(contractDescs[i]), batch[i].Error)
 			// In case of batch failure, retry missing/failed elements as single calls.
 			data, err := b.EthereumTypeRpcCallAtBlock(callData, hexutil.Encode(contractDescs[i]), "", blockNumber)
@@ -462,6 +469,7 @@ func (b *EthereumRPC) erc20BalancesBatchAtBlock(batcher batchCaller, callData st
 			}
 			balances[i] = parseSimpleNumericProperty(data)
 			if balances[i] == nil {
+				b.observeEthCallError("single", "invalid")
 				glog.Warningf("erc20 single eth_call invalid result for %s: %q", hexutil.Encode(contractDescs[i]), data)
 			}
 			continue
@@ -469,6 +477,7 @@ func (b *EthereumRPC) erc20BalancesBatchAtBlock(batcher batchCaller, callData st
 		// Leave nil on parse failures so callers can retry per contract if needed.
 		balances[i] = parseSimpleNumericProperty(results[i])
 		if balances[i] == nil {
+			b.observeEthCallError("batch", "invalid")
 			glog.Warningf("erc20 batch eth_call invalid result for %s: %q", hexutil.Encode(contractDescs[i]), results[i])
 		}
 	}

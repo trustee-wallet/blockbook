@@ -20,6 +20,9 @@ type Metrics struct {
 	MempoolResyncDuration     prometheus.Histogram
 	TxCacheEfficiency         *prometheus.CounterVec
 	RPCLatency                *prometheus.HistogramVec
+	EthCallRequests           *prometheus.CounterVec
+	EthCallErrors             *prometheus.CounterVec
+	EthCallBatchSize          prometheus.Histogram
 	IndexResyncErrors         *prometheus.CounterVec
 	IndexDBSize               prometheus.Gauge
 	ExplorerViews             *prometheus.CounterVec
@@ -148,6 +151,30 @@ func GetMetrics(coin string) (*Metrics, error) {
 			ConstLabels: Labels{"coin": coin},
 		},
 		[]string{"method", "error"},
+	)
+	metrics.EthCallRequests = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name:        "blockbook_eth_call_requests",
+			Help:        "Total number of eth_call requests by mode",
+			ConstLabels: Labels{"coin": coin},
+		},
+		[]string{"mode"},
+	)
+	metrics.EthCallErrors = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name:        "blockbook_eth_call_errors",
+			Help:        "Total number of eth_call errors by mode and type",
+			ConstLabels: Labels{"coin": coin},
+		},
+		[]string{"mode", "type"},
+	)
+	metrics.EthCallBatchSize = prometheus.NewHistogram(
+		prometheus.HistogramOpts{
+			Name:        "blockbook_eth_call_batch_size",
+			Help:        "Number of eth_call items per batch request",
+			Buckets:     []float64{1, 2, 5, 10, 20, 50, 100, 200},
+			ConstLabels: Labels{"coin": coin},
+		},
 	)
 	metrics.IndexResyncErrors = prometheus.NewCounterVec(
 		prometheus.CounterOpts{
