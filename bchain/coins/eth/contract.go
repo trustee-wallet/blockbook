@@ -516,6 +516,11 @@ func (b *EthereumRPC) GetTokenURI(contractDesc bchain.AddressDescriptor, tokenID
 	}
 	// try ERC721 tokenURI method and  ERC1155 uri method
 	for _, method := range []string{erc721TokenURIMethodSignature, erc1155URIMethodSignature} {
+		if method == erc721TokenURIMethodSignature {
+			b.observeEthCallTokenURI("erc721_token_uri")
+		} else {
+			b.observeEthCallTokenURI("erc1155_uri")
+		}
 		data, err := b.EthereumTypeRpcCall(method+id, address, "")
 		if err == nil && data != "" {
 			uri := parseSimpleStringProperty(data)

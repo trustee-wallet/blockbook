@@ -194,6 +194,20 @@ func (b *EthereumRPC) observeEthCallContractInfo(field string) {
 	b.metrics.EthCallContractInfo.With(common.Labels{"field": field}).Inc()
 }
 
+func (b *EthereumRPC) observeEthCallTokenURI(method string) {
+	if b.metrics == nil {
+		return
+	}
+	b.metrics.EthCallTokenURI.With(common.Labels{"method": method}).Inc()
+}
+
+func (b *EthereumRPC) observeEthCallStakingPool(field string) {
+	if b.metrics == nil {
+		return
+	}
+	b.metrics.EthCallStakingPool.With(common.Labels{"field": field}).Inc()
+}
+
 // EnsureSameRPCHost validates that both RPC URLs point to the same host.
 func EnsureSameRPCHost(httpURL, wsURL string) error {
 	if httpURL == "" || wsURL == "" {
