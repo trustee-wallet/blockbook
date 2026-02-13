@@ -314,6 +314,7 @@ func erc20BalanceOfCallData(addrDesc bchain.AddressDescriptor) string {
 
 func (b *EthereumRPC) fetchContractInfo(address string) (*bchain.ContractInfo, error) {
 	var contract bchain.ContractInfo
+	b.observeEthCallContractInfo("name")
 	data, err := b.EthereumTypeRpcCall(contractNameSignature, address, "")
 	if err != nil {
 		// ignore the error from the eth_call - since geth v1.9.15 they changed the behavior
@@ -325,6 +326,7 @@ func (b *EthereumRPC) fetchContractInfo(address string) (*bchain.ContractInfo, e
 	}
 	name := strings.TrimSpace(parseSimpleStringProperty(data))
 	if name != "" {
+		b.observeEthCallContractInfo("symbol")
 		data, err = b.EthereumTypeRpcCall(contractSymbolSignature, address, "")
 		if err != nil {
 			// glog.Warning(errors.Annotatef(err, "Contract SymbolSignature %v", address))
@@ -332,6 +334,7 @@ func (b *EthereumRPC) fetchContractInfo(address string) (*bchain.ContractInfo, e
 			// return nil, errors.Annotatef(err, "erc20SymbolSignature %v", address)
 		}
 		symbol := strings.TrimSpace(parseSimpleStringProperty(data))
+		b.observeEthCallContractInfo("decimals")
 		data, _ = b.EthereumTypeRpcCall(contractDecimalsSignature, address, "")
 		// if err != nil {
 		// 	glog.Warning(errors.Annotatef(err, "Contract DecimalsSignature %v", address))
@@ -460,6 +463,9 @@ func (b *EthereumRPC) erc20BalancesBatchAtBlock(batcher batchCaller, callData st
 	for i := range batch {
 		if batch[i].Error != nil {
 			b.observeEthCallError("batch", "elem")
+			if isNonRetriableEthCallError(batch[i].Error) {
+				continue
+			}
 			glog.Warningf("erc20 batch eth_call failed for %s: %v", hexutil.Encode(contractDescs[i]), batch[i].Error)
 			// In case of batch failure, retry missing/failed elements as single calls.
 			data, err := b.EthereumTypeRpcCallAtBlock(callData, hexutil.Encode(contractDescs[i]), "", blockNumber)
@@ -482,6 +488,19 @@ func (b *EthereumRPC) erc20BalancesBatchAtBlock(batcher batchCaller, callData st
 		}
 	}
 	return balances, nil
+}
+
+func isNonRetriableEthCallError(err error) bool {
+	if err == nil {
+		return false
+	}
+	// These errors are deterministic for the given call data and won't succeed on retry.
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "execution reverted") ||
+		strings.Contains(msg, "invalid opcode") ||
+		strings.Contains(msg, "out of gas") ||
+		strings.Contains(msg, "stack underflow") ||
+		strings.Contains(msg, "revert")
 }
 
 // GetTokenURI returns URI of non fungible or multi token defined by token id

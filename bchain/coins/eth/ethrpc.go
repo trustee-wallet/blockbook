@@ -187,6 +187,13 @@ func (b *EthereumRPC) observeEthCallBatch(size int) {
 	b.metrics.EthCallBatchSize.Observe(float64(size))
 }
 
+func (b *EthereumRPC) observeEthCallContractInfo(field string) {
+	if b.metrics == nil {
+		return
+	}
+	b.metrics.EthCallContractInfo.With(common.Labels{"field": field}).Inc()
+}
+
 // EnsureSameRPCHost validates that both RPC URLs point to the same host.
 func EnsureSameRPCHost(httpURL, wsURL string) error {
 	if httpURL == "" || wsURL == "" {

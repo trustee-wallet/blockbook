@@ -23,6 +23,7 @@ type Metrics struct {
 	EthCallRequests           *prometheus.CounterVec
 	EthCallErrors             *prometheus.CounterVec
 	EthCallBatchSize          prometheus.Histogram
+	EthCallContractInfo       *prometheus.CounterVec
 	IndexResyncErrors         *prometheus.CounterVec
 	IndexDBSize               prometheus.Gauge
 	ExplorerViews             *prometheus.CounterVec
@@ -175,6 +176,14 @@ func GetMetrics(coin string) (*Metrics, error) {
 			Buckets:     []float64{1, 2, 5, 10, 20, 50, 100, 200},
 			ConstLabels: Labels{"coin": coin},
 		},
+	)
+	metrics.EthCallContractInfo = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name:        "blockbook_eth_call_contract_info_requests",
+			Help:        "Total number of eth_call requests for contract info fields",
+			ConstLabels: Labels{"coin": coin},
+		},
+		[]string{"field"},
 	)
 	metrics.IndexResyncErrors = prometheus.NewCounterVec(
 		prometheus.CounterOpts{
