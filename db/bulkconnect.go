@@ -1,6 +1,7 @@
 package db
 
 import (
+	"fmt"
 	"time"
 
 	"github.com/golang/glog"
@@ -31,6 +32,7 @@ type BulkConnect struct {
 	balances           map[string]*AddrBalance
 	addressContracts   map[string]*unpackedAddrContracts
 	height             uint32
+	bulkStats          bulkConnectStats
 }
 
 const (
@@ -43,6 +45,14 @@ const (
 	partialStoreAddrContracts = maxBulkAddrContracts / 10
 	maxBlockFilters           = 1000
 )
+
+type bulkConnectStats struct {
+	txs               uint64
+	tokenTransfers    uint64
+	internalTransfers uint64
+	vin               uint64
+	vout              uint64
+}
 
 // InitBulkConnect initializes bulk connect and switches DB to inconsistent state
 func (d *RocksDB) InitBulkConnect() (*BulkConnect, error) {
@@ -183,7 +193,48 @@ func (b *BulkConnect) storeBulkBlockFilters(wb *grocksdb.WriteBatch) error {
 	return nil
 }
 
+func (b *BulkConnect) addEthereumStats(blockTxs []ethBlockTx) {
+	b.bulkStats.txs += uint64(len(blockTxs))
+	for i := range blockTxs {
+		b.bulkStats.tokenTransfers += uint64(len(blockTxs[i].contracts))
+		if blockTxs[i].internalData != nil {
+			b.bulkStats.internalTransfers += uint64(len(blockTxs[i].internalData.transfers))
+		}
+	}
+}
+
+func (b *BulkConnect) addBitcoinStats(block *bchain.Block) {
+	b.bulkStats.txs += uint64(len(block.Txs))
+	for i := range block.Txs {
+		b.bulkStats.vin += uint64(len(block.Txs[i].Vin))
+		b.bulkStats.vout += uint64(len(block.Txs[i].Vout))
+	}
+}
+
+func (b *BulkConnect) statsLogSuffix() string {
+	if b.bulkStats.txs == 0 && b.bulkStats.tokenTransfers == 0 && b.bulkStats.internalTransfers == 0 && b.bulkStats.vin == 0 && b.bulkStats.vout == 0 {
+		return ""
+	}
+	if b.bulkStats.tokenTransfers == 0 && b.bulkStats.internalTransfers == 0 && b.bulkStats.vin == 0 && b.bulkStats.vout == 0 {
+		return fmt.Sprintf(", txs=%d", b.bulkStats.txs)
+	}
+	if b.bulkStats.tokenTransfers == 0 && b.bulkStats.internalTransfers == 0 {
+		return fmt.Sprintf(", txs=%d vin=%d vout=%d", b.bulkStats.txs, b.bulkStats.vin, b.bulkStats.vout)
+	}
+	if b.bulkStats.vin == 0 && b.bulkStats.vout == 0 {
+		return fmt.Sprintf(", txs=%d token_transfers=%d internal_transfers=%d",
+			b.bulkStats.txs, b.bulkStats.tokenTransfers, b.bulkStats.internalTransfers)
+	}
+	return fmt.Sprintf(", txs=%d token_transfers=%d internal_transfers=%d vin=%d vout=%d",
+		b.bulkStats.txs, b.bulkStats.tokenTransfers, b.bulkStats.internalTransfers, b.bulkStats.vin, b.bulkStats.vout)
+}
+
+func (b *BulkConnect) resetStats() {
+	b.bulkStats = bulkConnectStats{}
+}
+
 func (b *BulkConnect) connectBlockBitcoinType(block *bchain.Block, storeBlockTxs bool) error {
+	b.addBitcoinStats(block)
 	addresses := make(addressesMap)
 	gf, err := bchain.NewGolombFilter(b.d.is.BlockGolombFilterP, b.d.is.BlockFilterScripts, block.BlockHeader.Hash, b.d.is.BlockFilterUseZeroedKey)
 	if err != nil {
@@ -247,7 +298,12 @@ func (b *BulkConnect) connectBlockBitcoinType(block *bchain.Block, storeBlockTxs
 			return err
 		}
 		if bac > b.bulkAddressesCount {
-			glog.Info("rocksdb: height ", b.height, ", stored ", bac, " addresses, done in ", time.Since(start))
+			suffix := b.statsLogSuffix()
+			if b.d.hotAddrTracker != nil {
+				suffix += b.d.hotAddrTracker.LogSuffix()
+			}
+			glog.Info("rocksdb: height ", b.height, ", stored ", bac, " addresses, done in ", time.Since(start), suffix)
+			b.resetStats()
 		}
 	}
 	if storeAddressesChan != nil {
@@ -309,6 +365,7 @@ func (b *BulkConnect) connectBlockEthereumType(block *bchain.Block, storeBlockTx
 	if err != nil {
 		return err
 	}
+	b.addEthereumStats(blockTxs)
 	b.ethBlockTxs = append(b.ethBlockTxs, blockTxs...)
 	var storeAddrContracts chan error
 	var sa bool
@@ -355,7 +412,12 @@ func (b *BulkConnect) connectBlockEthereumType(block *bchain.Block, storeBlockTx
 			return err
 		}
 		if bac > b.bulkAddressesCount {
-			glog.Info("rocksdb: height ", b.height, ", stored ", bac, " addresses, done in ", time.Since(start))
+			suffix := b.statsLogSuffix()
+			if b.d.hotAddrTracker != nil {
+				suffix += b.d.hotAddrTracker.LogSuffix()
+			}
+			glog.Info("rocksdb: height ", b.height, ", stored ", bac, " addresses, done in ", time.Since(start), suffix)
+			b.resetStats()
 		}
 	} else {
 		// if there are blockSpecificData, store them
@@ -422,7 +484,12 @@ func (b *BulkConnect) Close() error {
 	if err := b.d.WriteBatch(wb); err != nil {
 		return err
 	}
-	glog.Info("rocksdb: height ", b.height, ", stored ", bac, " addresses, done in ", time.Since(start))
+	suffix := b.statsLogSuffix()
+	if b.d.hotAddrTracker != nil {
+		suffix += b.d.hotAddrTracker.LogSuffix()
+	}
+	glog.Info("rocksdb: height ", b.height, ", stored ", bac, " addresses, done in ", time.Since(start), suffix)
+	b.resetStats()
 	if storeTxAddressesChan != nil {
 		if err := <-storeTxAddressesChan; err != nil {
 			return err
