@@ -92,6 +92,7 @@ type EthereumRPC struct {
 	NewTx                     bchain.EVMNewTxSubscriber
 	newTxSubscription         bchain.EVMClientSubscription
 	ChainConfig               *Configuration
+	metrics                   *common.Metrics
 	supportedStakingPools     []string
 	stakingPoolNames          []string
 	stakingPoolContracts      []string
@@ -159,6 +160,52 @@ func NewEthereumRPC(config json.RawMessage, pushHandler func(bchain.Notification
 	s.PushHandler = pushHandler
 
 	return s, nil
+}
+
+func (b *EthereumRPC) SetMetrics(metrics *common.Metrics) {
+	b.metrics = metrics
+}
+
+func (b *EthereumRPC) observeEthCall(mode string, count int) {
+	if b.metrics == nil || count <= 0 {
+		return
+	}
+	b.metrics.EthCallRequests.With(common.Labels{"mode": mode}).Add(float64(count))
+}
+
+func (b *EthereumRPC) observeEthCallError(mode, errType string) {
+	if b.metrics == nil {
+		return
+	}
+	b.metrics.EthCallErrors.With(common.Labels{"mode": mode, "type": errType}).Inc()
+}
+
+func (b *EthereumRPC) observeEthCallBatch(size int) {
+	if b.metrics == nil || size <= 0 {
+		return
+	}
+	b.metrics.EthCallBatchSize.Observe(float64(size))
+}
+
+func (b *EthereumRPC) observeEthCallContractInfo(field string) {
+	if b.metrics == nil {
+		return
+	}
+	b.metrics.EthCallContractInfo.With(common.Labels{"field": field}).Inc()
+}
+
+func (b *EthereumRPC) observeEthCallTokenURI(method string) {
+	if b.metrics == nil {
+		return
+	}
+	b.metrics.EthCallTokenURI.With(common.Labels{"method": method}).Inc()
+}
+
+func (b *EthereumRPC) observeEthCallStakingPool(field string) {
+	if b.metrics == nil {
+		return
+	}
+	b.metrics.EthCallStakingPool.With(common.Labels{"field": field}).Inc()
 }
 
 // EnsureSameRPCHost validates that both RPC URLs point to the same host.

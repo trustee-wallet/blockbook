@@ -290,12 +290,14 @@ func (b *EthereumRPC) EthereumTypeRpcCallAtBlock(data, to, from string, blockNum
 		args["from"] = from
 	}
 
+	b.observeEthCall("single", 1)
 	ctx, cancel := context.WithTimeout(context.Background(), b.Timeout)
 	defer cancel()
 	var r string
 	blockArg := bchain.ToBlockNumArg(blockNumber)
 	err := b.RPC.CallContext(ctx, &r, "eth_call", args, blockArg)
 	if err != nil {
+		b.observeEthCallError("single", "rpc")
 		return "", err
 	}
 	return r, nil
@@ -312,6 +314,7 @@ func erc20BalanceOfCallData(addrDesc bchain.AddressDescriptor) string {
 
 func (b *EthereumRPC) fetchContractInfo(address string) (*bchain.ContractInfo, error) {
 	var contract bchain.ContractInfo
+	b.observeEthCallContractInfo("name")
 	data, err := b.EthereumTypeRpcCall(contractNameSignature, address, "")
 	if err != nil {
 		// ignore the error from the eth_call - since geth v1.9.15 they changed the behavior
@@ -323,6 +326,7 @@ func (b *EthereumRPC) fetchContractInfo(address string) (*bchain.ContractInfo, e
 	}
 	name := strings.TrimSpace(parseSimpleStringProperty(data))
 	if name != "" {
+		b.observeEthCallContractInfo("symbol")
 		data, err = b.EthereumTypeRpcCall(contractSymbolSignature, address, "")
 		if err != nil {
 			// glog.Warning(errors.Annotatef(err, "Contract SymbolSignature %v", address))
@@ -330,6 +334,7 @@ func (b *EthereumRPC) fetchContractInfo(address string) (*bchain.ContractInfo, e
 			// return nil, errors.Annotatef(err, "erc20SymbolSignature %v", address)
 		}
 		symbol := strings.TrimSpace(parseSimpleStringProperty(data))
+		b.observeEthCallContractInfo("decimals")
 		data, _ = b.EthereumTypeRpcCall(contractDecimalsSignature, address, "")
 		// if err != nil {
 		// 	glog.Warning(errors.Annotatef(err, "Contract DecimalsSignature %v", address))
@@ -373,6 +378,7 @@ func (b *EthereumRPC) EthereumTypeGetErc20ContractBalanceAtBlock(addrDesc, contr
 	}
 	r := parseSimpleNumericProperty(data)
 	if r == nil {
+		b.observeEthCallError("single", "invalid")
 		return nil, errors.New("Invalid balance")
 	}
 	return r, nil
@@ -445,14 +451,21 @@ func (b *EthereumRPC) erc20BalancesBatchAtBlock(batcher batchCaller, callData st
 			Result: &results[i],
 		}
 	}
+	b.observeEthCall("batch", len(contractDescs))
+	b.observeEthCallBatch(len(contractDescs))
 	ctx, cancel := context.WithTimeout(context.Background(), b.Timeout)
 	defer cancel()
 	if err := batcher.BatchCallContext(ctx, batch); err != nil {
+		b.observeEthCallError("batch", "rpc")
 		return nil, err
 	}
 	balances := make([]*big.Int, len(contractDescs))
 	for i := range batch {
 		if batch[i].Error != nil {
+			b.observeEthCallError("batch", "elem")
+			if isNonRetriableEthCallError(batch[i].Error) {
+				continue
+			}
 			glog.Warningf("erc20 batch eth_call failed for %s: %v", hexutil.Encode(contractDescs[i]), batch[i].Error)
 			// In case of batch failure, retry missing/failed elements as single calls.
 			data, err := b.EthereumTypeRpcCallAtBlock(callData, hexutil.Encode(contractDescs[i]), "", blockNumber)
@@ -462,6 +475,7 @@ func (b *EthereumRPC) erc20BalancesBatchAtBlock(batcher batchCaller, callData st
 			}
 			balances[i] = parseSimpleNumericProperty(data)
 			if balances[i] == nil {
+				b.observeEthCallError("single", "invalid")
 				glog.Warningf("erc20 single eth_call invalid result for %s: %q", hexutil.Encode(contractDescs[i]), data)
 			}
 			continue
@@ -469,10 +483,24 @@ func (b *EthereumRPC) erc20BalancesBatchAtBlock(batcher batchCaller, callData st
 		// Leave nil on parse failures so callers can retry per contract if needed.
 		balances[i] = parseSimpleNumericProperty(results[i])
 		if balances[i] == nil {
+			b.observeEthCallError("batch", "invalid")
 			glog.Warningf("erc20 batch eth_call invalid result for %s: %q", hexutil.Encode(contractDescs[i]), results[i])
 		}
 	}
 	return balances, nil
+}
+
+func isNonRetriableEthCallError(err error) bool {
+	if err == nil {
+		return false
+	}
+	// These errors are deterministic for the given call data and won't succeed on retry.
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "execution reverted") ||
+		strings.Contains(msg, "invalid opcode") ||
+		strings.Contains(msg, "out of gas") ||
+		strings.Contains(msg, "stack underflow") ||
+		strings.Contains(msg, "revert")
 }
 
 // GetTokenURI returns URI of non fungible or multi token defined by token id
@@ -488,6 +516,11 @@ func (b *EthereumRPC) GetTokenURI(contractDesc bchain.AddressDescriptor, tokenID
 	}
 	// try ERC721 tokenURI method and  ERC1155 uri method
 	for _, method := range []string{erc721TokenURIMethodSignature, erc1155URIMethodSignature} {
+		if method == erc721TokenURIMethodSignature {
+			b.observeEthCallTokenURI("erc721_token_uri")
+		} else {
+			b.observeEthCallTokenURI("erc1155_uri")
+		}
 		data, err := b.EthereumTypeRpcCall(method+id, address, "")
 		if err == nil && data != "" {
 			uri := parseSimpleStringProperty(data)

@@ -154,6 +154,10 @@ func init() {
 	BlockChainFactories["Base Archive"] = base.NewBaseRPC
 }
 
+type metricsSetter interface {
+	SetMetrics(*common.Metrics)
+}
+
 // NewBlockChain creates bchain.BlockChain and bchain.Mempool for the coin passed by the parameter coin
 func NewBlockChain(coin string, configfile string, pushHandler func(bchain.NotificationType), metrics *common.Metrics) (bchain.BlockChain, bchain.Mempool, error) {
 	data, err := os.ReadFile(configfile)
@@ -172,6 +176,9 @@ func NewBlockChain(coin string, configfile string, pushHandler func(bchain.Notif
 	bc, err := bcf(config, pushHandler)
 	if err != nil {
 		return nil, nil, err
+	}
+	if withMetrics, ok := bc.(metricsSetter); ok {
+		withMetrics.SetMetrics(metrics)
 	}
 	err = bc.Initialize()
 	if err != nil {

@@ -15,6 +15,7 @@ import (
 	"github.com/linxGnu/grocksdb"
 	"github.com/trezor/blockbook/bchain"
 	"github.com/trezor/blockbook/bchain/coins/eth"
+	"github.com/trezor/blockbook/common"
 )
 
 const InternalTxIndexOffset = 1
@@ -1750,7 +1751,13 @@ func (d *RocksDB) getUnpackedAddrDescContracts(addrDesc bchain.AddressDescriptor
 	rv, found := d.addrContractsCache[string(addrDesc)]
 	d.addrContractsCacheMux.Unlock()
 	if found && rv != nil {
+		if d.metrics != nil {
+			d.metrics.AddrContractsCacheHits.Inc()
+		}
 		return rv, nil
+	}
+	if d.metrics != nil {
+		d.metrics.AddrContractsCacheMisses.Inc()
 	}
 	val, err := d.db.GetCF(d.ro, d.cfh[cfAddressContracts], addrDesc)
 	if err != nil {
@@ -1767,6 +1774,8 @@ func (d *RocksDB) getUnpackedAddrDescContracts(addrDesc bchain.AddressDescriptor
 		minSize = addrContractsCacheMinSize
 	}
 	if err == nil && rv != nil && len(buf) > minSize {
+		var cacheEntries int
+		var cacheBytes int64
 		shouldFlush := false
 		d.addrContractsCacheMux.Lock()
 		key := string(addrDesc)
@@ -1778,7 +1787,13 @@ func (d *RocksDB) getUnpackedAddrDescContracts(addrDesc bchain.AddressDescriptor
 				shouldFlush = true
 			}
 		}
+		cacheEntries = len(d.addrContractsCache)
+		cacheBytes = d.addrContractsCacheBytes
 		d.addrContractsCacheMux.Unlock()
+		if d.metrics != nil {
+			d.metrics.AddrContractsCacheEntries.Set(float64(cacheEntries))
+			d.metrics.AddrContractsCacheBytes.Set(float64(cacheBytes))
+		}
 		if shouldFlush {
 			// Flush early when we exceed the cap to avoid unbounded memory growth.
 			d.flushAddrContractsCache()
@@ -1913,7 +1928,10 @@ func (d *RocksDB) storeUnpackedAddressContracts(wb *grocksdb.WriteBatch, acm map
 			wb.DeleteCF(d.cfh[cfAddressContracts], bchain.AddressDescriptor(addrDesc))
 		} else {
 			// do not store large address contracts found in cache
-			if _, found := d.addrContractsCache[addrDesc]; !found {
+			d.addrContractsCacheMux.Lock()
+			_, found := d.addrContractsCache[addrDesc]
+			d.addrContractsCacheMux.Unlock()
+			if !found {
 				buf := packUnpackedAddrContracts(acs)
 				wb.PutCF(d.cfh[cfAddressContracts], bchain.AddressDescriptor(addrDesc), buf)
 			}
@@ -1956,6 +1974,13 @@ func (d *RocksDB) flushAddrContractsCache() {
 	d.addrContractsCache = make(map[string]*unpackedAddrContracts)
 	d.addrContractsCacheBytes = 0
 	d.addrContractsCacheMux.Unlock()
+	if d.metrics != nil {
+		d.metrics.AddrContractsCacheEntries.Set(0)
+		d.metrics.AddrContractsCacheBytes.Set(0)
+		if count > 0 {
+			d.metrics.AddrContractsCacheFlushes.With(common.Labels{"reason": "cap"}).Inc()
+		}
+	}
 	if count > 0 {
 		d.writeContractsCacheSnapshot(cache)
 	}
@@ -1964,8 +1989,12 @@ func (d *RocksDB) flushAddrContractsCache() {
 
 func (d *RocksDB) storeAddrContractsCache() {
 	start := time.Now()
-	if len(d.addrContractsCache) > 0 {
+	count := len(d.addrContractsCache)
+	if count > 0 {
 		d.writeContractsCache()
+	}
+	if d.metrics != nil && count > 0 {
+		d.metrics.AddrContractsCacheFlushes.With(common.Labels{"reason": "timer"}).Inc()
 	}
 	glog.Info("storeAddrContractsCache: store ", len(d.addrContractsCache), " entries in ", time.Since(start))
 }
