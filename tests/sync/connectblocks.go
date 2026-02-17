@@ -32,11 +32,11 @@ func testConnectBlocks(t *testing.T, h *TestHandler) {
 				t.Fatal(err)
 			}
 
-			err = db.ConnectBlocks(sw, func(hash string, height uint32) {
-				if hash == upperHash {
-					close(ch)
-				}
-			}, true)
+				err = db.ConnectBlocks(sw, func(block *bchain.Block) {
+					if block != nil && block.Hash == upperHash {
+						close(ch)
+					}
+				}, true)
 			if err != nil && err != db.ErrOperationInterrupted {
 				t.Fatal(err)
 			}
