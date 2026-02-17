@@ -1045,6 +1045,20 @@ func getEthereumInternalTransfers(tx *bchain.Tx) []bchain.EthereumInternalTransf
 	return esd.InternalData.Transfers
 }
 
+func setEthereumReceiptIfAvailable(tx *bchain.Tx, getReceipt func(string) (*bchain.RpcReceipt, error)) {
+	csd, ok := tx.CoinSpecificData.(bchain.EthereumSpecificData)
+	if !ok {
+		return
+	}
+	receipt, err := getReceipt(tx.Txid)
+	if err != nil {
+		glog.Error("EthereumTypeGetTransactionReceipt error ", err, " for ", tx.Txid)
+		return
+	}
+	csd.Receipt = receipt
+	tx.CoinSpecificData = csd
+}
+
 func (s *WebsocketServer) publishNewBlockTxsByAddr(block *bchain.Block) {
 	for _, tx := range block.Txs {
 		setConfirmedBlockTxMetadata(&tx, block.Time)
@@ -1061,15 +1075,7 @@ func (s *WebsocketServer) publishNewBlockTxsByAddr(block *bchain.Block) {
 		subscribed := s.getNewTxSubscriptions(vins, tx.Vout, tokenTransfers, internalTransfers)
 		if len(subscribed) > 0 {
 			go func(tx bchain.Tx, subscribed map[string]struct{}) {
-				if csd, ok := tx.CoinSpecificData.(bchain.EthereumSpecificData); ok {
-					receipt, err := s.chain.EthereumTypeGetTransactionReceipt(tx.Txid)
-					if err != nil {
-						glog.Error("EthereumTypeGetTransactionReceipt error ", err, " for ", tx.Txid)
-						return
-					}
-					csd.Receipt = receipt
-					tx.CoinSpecificData = csd
-				}
+				setEthereumReceiptIfAvailable(&tx, s.chain.EthereumTypeGetTransactionReceipt)
 				atx, err := s.api.GetTransactionFromBchainTx(&tx, int(block.Height), false, false, nil)
 				if err != nil {
 					glog.Error("GetTransactionFromBchainTx error ", err, " for ", tx.Txid)

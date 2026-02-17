@@ -3,6 +3,7 @@
 package server
 
 import (
+	"errors"
 	"testing"
 
 	"github.com/trezor/blockbook/bchain"
@@ -77,5 +78,48 @@ func TestGetEthereumInternalTransfersReturnsTransfers(t *testing.T) {
 	}
 	if transfers[0].From != expected[0].From || transfers[0].To != expected[0].To {
 		t.Fatalf("transfers[0] = %+v, want %+v", transfers[0], expected[0])
+	}
+}
+
+func TestSetEthereumReceiptIfAvailableKeepsTxWhenReceiptFails(t *testing.T) {
+	tx := bchain.Tx{
+		Txid: "0xabc",
+		CoinSpecificData: bchain.EthereumSpecificData{
+			Tx: &bchain.RpcTransaction{Hash: "0xabc"},
+		},
+	}
+
+	setEthereumReceiptIfAvailable(&tx, func(string) (*bchain.RpcReceipt, error) {
+		return nil, errors.New("rpc failure")
+	})
+
+	csd, ok := tx.CoinSpecificData.(bchain.EthereumSpecificData)
+	if !ok {
+		t.Fatal("CoinSpecificData has unexpected type")
+	}
+	if csd.Receipt != nil {
+		t.Fatalf("Receipt = %+v, want nil", csd.Receipt)
+	}
+}
+
+func TestSetEthereumReceiptIfAvailableSetsReceipt(t *testing.T) {
+	tx := bchain.Tx{
+		Txid: "0xdef",
+		CoinSpecificData: bchain.EthereumSpecificData{
+			Tx: &bchain.RpcTransaction{Hash: "0xdef"},
+		},
+	}
+	wantReceipt := &bchain.RpcReceipt{GasUsed: "0x5208"}
+
+	setEthereumReceiptIfAvailable(&tx, func(string) (*bchain.RpcReceipt, error) {
+		return wantReceipt, nil
+	})
+
+	csd, ok := tx.CoinSpecificData.(bchain.EthereumSpecificData)
+	if !ok {
+		t.Fatal("CoinSpecificData has unexpected type")
+	}
+	if csd.Receipt != wantReceipt {
+		t.Fatalf("Receipt = %+v, want %+v", csd.Receipt, wantReceipt)
 	}
 }
