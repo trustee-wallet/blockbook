@@ -6,7 +6,9 @@ import (
 	"errors"
 	"testing"
 
+	"github.com/trezor/blockbook/api"
 	"github.com/trezor/blockbook/bchain"
+	"github.com/trezor/blockbook/tests/dbtestdata"
 )
 
 func TestSetConfirmedBlockTxMetadataSetsConfirmedFields(t *testing.T) {
@@ -121,5 +123,86 @@ func TestSetEthereumReceiptIfAvailableSetsReceipt(t *testing.T) {
 	}
 	if csd.Receipt != wantReceipt {
 		t.Fatalf("Receipt = %+v, want %+v", csd.Receipt, wantReceipt)
+	}
+}
+
+func TestSendOnNewTxAddrFiltersNewBlockTxSubscriptions(t *testing.T) {
+	parser, _ := setupChain(t)
+	s := &WebsocketServer{
+		chainParser:          parser,
+		addressSubscriptions: make(map[string]map[*websocketChannel]*addressDetails),
+	}
+	addrDesc, err := parser.GetAddrDescFromAddress(dbtestdata.Addr1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stringAddrDesc := string(addrDesc)
+	onlyMempool := &websocketChannel{out: make(chan *WsRes, 1), alive: true}
+	withNewBlockTxs := &websocketChannel{out: make(chan *WsRes, 1), alive: true}
+	s.addressSubscriptions[stringAddrDesc] = map[*websocketChannel]*addressDetails{
+		onlyMempool: {
+			requestID:          "mempool-only",
+			publishNewBlockTxs: false,
+		},
+		withNewBlockTxs: {
+			requestID:          "with-new-block-txs",
+			publishNewBlockTxs: true,
+		},
+	}
+
+	s.sendOnNewTxAddr(stringAddrDesc, &api.Tx{Txid: "new-block-tx"}, true)
+
+	if len(onlyMempool.out) != 0 {
+		t.Fatalf("mempool-only subscriber received %d messages, want 0", len(onlyMempool.out))
+	}
+	if len(withNewBlockTxs.out) != 1 {
+		t.Fatalf("newBlockTxs subscriber received %d messages, want 1", len(withNewBlockTxs.out))
+	}
+}
+
+func TestPopulateBitcoinVinAddrDescsEnablesSenderOnlyMatching(t *testing.T) {
+	parser, _ := setupChain(t)
+	block := dbtestdata.GetTestBitcoinTypeBlock2(parser)
+	tx := block.Txs[0] // spends Addr3/Addr2 and pays Addr6/Addr7
+
+	vins := make([]bchain.MempoolVin, len(tx.Vin))
+	for i := range tx.Vin {
+		vins[i] = bchain.MempoolVin{Vin: tx.Vin[i]}
+	}
+	addr3Desc, err := parser.GetAddrDescFromAddress(dbtestdata.Addr3)
+	if err != nil {
+		t.Fatal(err)
+	}
+	addr2Desc, err := parser.GetAddrDescFromAddress(dbtestdata.Addr2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dummy := &websocketChannel{}
+	s := &WebsocketServer{
+		chainParser: parser,
+		addressSubscriptions: map[string]map[*websocketChannel]*addressDetails{
+			string(addr3Desc): {dummy: {requestID: "sender", publishNewBlockTxs: true}},
+		},
+	}
+
+	withoutResolvedVins := s.getNewTxSubscriptions(vins, tx.Vout, nil, nil)
+	if _, ok := withoutResolvedVins[string(addr3Desc)]; ok {
+		t.Fatal("sender subscription unexpectedly matched before vin descriptor resolution")
+	}
+
+	populateBitcoinVinAddrDescs(vins, func(txid string, vout uint32) (bchain.AddressDescriptor, error) {
+		switch {
+		case txid == dbtestdata.TxidB1T2 && vout == 0:
+			return addr3Desc, nil
+		case txid == dbtestdata.TxidB1T1 && vout == 1:
+			return addr2Desc, nil
+		default:
+			return nil, errors.New("not found")
+		}
+	})
+
+	withResolvedVins := s.getNewTxSubscriptions(vins, tx.Vout, nil, nil)
+	if _, ok := withResolvedVins[string(addr3Desc)]; !ok {
+		t.Fatal("sender subscription did not match after vin descriptor resolution")
 	}
 }

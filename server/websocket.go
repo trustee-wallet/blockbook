@@ -1059,6 +1059,35 @@ func setEthereumReceiptIfAvailable(tx *bchain.Tx, getReceipt func(string) (*bcha
 	tx.CoinSpecificData = csd
 }
 
+func populateBitcoinVinAddrDescs(vins []bchain.MempoolVin, getAddrDesc func(string, uint32) (bchain.AddressDescriptor, error)) {
+	if getAddrDesc == nil {
+		return
+	}
+	for i := range vins {
+		if len(vins[i].AddrDesc) > 0 || vins[i].Txid == "" {
+			continue
+		}
+		addrDesc, err := getAddrDesc(vins[i].Txid, vins[i].Vout)
+		if err == nil && len(addrDesc) > 0 {
+			vins[i].AddrDesc = addrDesc
+		}
+	}
+}
+
+func (s *WebsocketServer) getBitcoinVinAddrDesc(txid string, vout uint32) (bchain.AddressDescriptor, error) {
+	if s.txCache == nil {
+		return nil, bchain.ErrTxNotFound
+	}
+	prevTx, _, err := s.txCache.GetTransaction(txid)
+	if err != nil {
+		return nil, err
+	}
+	if int(vout) >= len(prevTx.Vout) {
+		return nil, bchain.ErrAddressMissing
+	}
+	return s.chainParser.GetAddrDescFromVout(&prevTx.Vout[vout])
+}
+
 func (s *WebsocketServer) publishNewBlockTxsByAddr(block *bchain.Block) {
 	for _, tx := range block.Txs {
 		setConfirmedBlockTxMetadata(&tx, block.Time)
@@ -1071,6 +1100,9 @@ func (s *WebsocketServer) publishNewBlockTxsByAddr(block *bchain.Block) {
 		vins := make([]bchain.MempoolVin, len(tx.Vin))
 		for i, vin := range tx.Vin {
 			vins[i] = bchain.MempoolVin{Vin: vin}
+		}
+		if s.chainParser.GetChainType() == bchain.ChainBitcoinType {
+			populateBitcoinVinAddrDescs(vins, s.getBitcoinVinAddrDesc)
 		}
 		subscribed := s.getNewTxSubscriptions(vins, tx.Vout, tokenTransfers, internalTransfers)
 		if len(subscribed) > 0 {
