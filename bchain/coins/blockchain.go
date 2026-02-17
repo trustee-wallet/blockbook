@@ -154,6 +154,10 @@ func init() {
 	BlockChainFactories["Base Archive"] = base.NewBaseRPC
 }
 
+type metricsSetter interface {
+	SetMetrics(*common.Metrics)
+}
+
 // NewBlockChain creates bchain.BlockChain and bchain.Mempool for the coin passed by the parameter coin
 func NewBlockChain(coin string, configfile string, pushHandler func(bchain.NotificationType), metrics *common.Metrics) (bchain.BlockChain, bchain.Mempool, error) {
 	data, err := os.ReadFile(configfile)
@@ -172,6 +176,9 @@ func NewBlockChain(coin string, configfile string, pushHandler func(bchain.Notif
 	bc, err := bcf(config, pushHandler)
 	if err != nil {
 		return nil, nil, err
+	}
+	if withMetrics, ok := bc.(metricsSetter); ok {
+		withMetrics.SetMetrics(metrics)
 	}
 	err = bc.Initialize()
 	if err != nil {
@@ -346,6 +353,11 @@ func (c *blockChainWithMetrics) GetContractInfo(contractDesc bchain.AddressDescr
 func (c *blockChainWithMetrics) EthereumTypeGetErc20ContractBalance(addrDesc, contractDesc bchain.AddressDescriptor) (v *big.Int, err error) {
 	defer func(s time.Time) { c.observeRPCLatency("EthereumTypeGetErc20ContractBalance", s, err) }(time.Now())
 	return c.b.EthereumTypeGetErc20ContractBalance(addrDesc, contractDesc)
+}
+
+func (c *blockChainWithMetrics) EthereumTypeGetErc20ContractBalances(addrDesc bchain.AddressDescriptor, contractDescs []bchain.AddressDescriptor) (v []*big.Int, err error) {
+	defer func(s time.Time) { c.observeRPCLatency("EthereumTypeGetErc20ContractBalances", s, err) }(time.Now())
+	return c.b.EthereumTypeGetErc20ContractBalances(addrDesc, contractDescs)
 }
 
 // GetTokenURI returns URI of non fungible or multi token defined by token id

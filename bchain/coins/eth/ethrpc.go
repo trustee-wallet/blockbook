@@ -7,6 +7,7 @@ import (
 	"io"
 	"math/big"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 	"sync"
@@ -38,14 +39,23 @@ const (
 	TestNetHoodi Network = 560048
 )
 
+const defaultErc20BatchSize = 100
+
 // Configuration represents json config file
 type Configuration struct {
 	CoinName                        string `json:"coin_name"`
 	CoinShortcut                    string `json:"coin_shortcut"`
 	Network                         string `json:"network"`
 	RPCURL                          string `json:"rpc_url"`
+	RPCURLWS                        string `json:"rpc_url_ws"`
 	RPCTimeout                      int    `json:"rpc_timeout"`
+	Erc20BatchSize                  int    `json:"erc20_batch_size,omitempty"`
 	BlockAddressesToKeep            int    `json:"block_addresses_to_keep"`
+	HotAddressMinContracts          int    `json:"hot_address_min_contracts,omitempty"`
+	HotAddressLRUCacheSize          int    `json:"hot_address_lru_cache_size,omitempty"`
+	HotAddressMinHits               int    `json:"hot_address_min_hits,omitempty"`
+	AddressContractsCacheMinSize    int    `json:"address_contracts_cache_min_size,omitempty"`
+	AddressContractsCacheMaxBytes   int64  `json:"address_contracts_cache_max_bytes,omitempty"`
 	AddressAliases                  bool   `json:"address_aliases,omitempty"`
 	MempoolTxTimeoutHours           int    `json:"mempoolTxTimeoutHours"`
 	QueryBackendOnMempoolResync     bool   `json:"queryBackendOnMempoolResync"`
@@ -61,23 +71,28 @@ type Configuration struct {
 // EthereumRPC is an interface to JSON-RPC eth service.
 type EthereumRPC struct {
 	*bchain.BaseChain
-	Client                    bchain.EVMClient
-	RPC                       bchain.EVMRPCClient
-	MainNetChainID            Network
-	Timeout                   time.Duration
-	Parser                    *EthereumParser
-	PushHandler               func(bchain.NotificationType)
-	OpenRPC                   func(string) (bchain.EVMRPCClient, bchain.EVMClient, error)
-	Mempool                   *bchain.MempoolEthereumType
-	mempoolInitialized        bool
-	bestHeaderLock            sync.Mutex
-	bestHeader                bchain.EVMHeader
-	bestHeaderTime            time.Time
+	Client             bchain.EVMClient
+	RPC                bchain.EVMRPCClient
+	MainNetChainID     Network
+	Timeout            time.Duration
+	Parser             *EthereumParser
+	PushHandler        func(bchain.NotificationType)
+	OpenRPC            func(string, string) (bchain.EVMRPCClient, bchain.EVMClient, error)
+	Mempool            *bchain.MempoolEthereumType
+	mempoolInitialized bool
+	bestHeaderLock     sync.Mutex
+	bestHeader         bchain.EVMHeader
+	bestHeaderTime     time.Time
+	// newBlockNotifyCh coalesces bursts of newHeads events into a single wake-up.
+	// This keeps the subscription reader unblocked while we refresh the canonical tip.
+	newBlockNotifyCh          chan struct{}
+	newBlockNotifyOnce        sync.Once
 	NewBlock                  bchain.EVMNewBlockSubscriber
 	newBlockSubscription      bchain.EVMClientSubscription
 	NewTx                     bchain.EVMNewTxSubscriber
 	newTxSubscription         bchain.EVMClientSubscription
 	ChainConfig               *Configuration
+	metrics                   *common.Metrics
 	supportedStakingPools     []string
 	stakingPoolNames          []string
 	stakingPoolContracts      []string
@@ -100,32 +115,200 @@ func NewEthereumRPC(config json.RawMessage, pushHandler func(bchain.Notification
 	if c.BlockAddressesToKeep < 100 {
 		c.BlockAddressesToKeep = 100
 	}
+	if c.Erc20BatchSize <= 0 {
+		c.Erc20BatchSize = defaultErc20BatchSize
+	}
+	if c.HotAddressMinContracts <= 0 {
+		c.HotAddressMinContracts = defaultHotAddressMinContracts
+	}
+	if c.HotAddressLRUCacheSize <= 0 {
+		c.HotAddressLRUCacheSize = defaultHotAddressLRUCacheSize
+	} else if c.HotAddressLRUCacheSize > maxHotAddressLRUCacheSize {
+		glog.Warningf("hot_address_lru_cache_size=%d is too large, clamping to %d", c.HotAddressLRUCacheSize, maxHotAddressLRUCacheSize)
+		c.HotAddressLRUCacheSize = maxHotAddressLRUCacheSize
+	}
+	if c.HotAddressMinHits <= 0 {
+		c.HotAddressMinHits = defaultHotAddressMinHits
+	} else if c.HotAddressMinHits > maxHotAddressMinHits {
+		glog.Warningf("hot_address_min_hits=%d is too large, clamping to %d", c.HotAddressMinHits, maxHotAddressMinHits)
+		c.HotAddressMinHits = maxHotAddressMinHits
+	}
+	if c.AddressContractsCacheMinSize <= 0 {
+		c.AddressContractsCacheMinSize = defaultAddressContractsCacheMinSize
+	}
+	if c.AddressContractsCacheMaxBytes <= 0 {
+		c.AddressContractsCacheMaxBytes = defaultAddressContractsCacheMaxBytes
+	}
 
 	s := &EthereumRPC{
 		BaseChain:   &bchain.BaseChain{},
 		ChainConfig: &c,
 	}
+	// 1-slot buffer ensures we only queue one "refresh tip" signal at a time.
+	s.newBlockNotifyCh = make(chan struct{}, 1)
 
 	ProcessInternalTransactions = c.ProcessInternalTransactions
 
 	// always create parser
 	s.Parser = NewEthereumParser(c.BlockAddressesToKeep, c.AddressAliases)
+	s.Parser.HotAddressMinContracts = c.HotAddressMinContracts
+	s.Parser.HotAddressLRUCacheSize = c.HotAddressLRUCacheSize
+	s.Parser.HotAddressMinHits = c.HotAddressMinHits
+	s.Parser.AddrContractsCacheMinSize = c.AddressContractsCacheMinSize
+	s.Parser.AddrContractsCacheMaxBytes = c.AddressContractsCacheMaxBytes
 	s.Timeout = time.Duration(c.RPCTimeout) * time.Second
 	s.PushHandler = pushHandler
 
 	return s, nil
 }
 
-// OpenRPC opens RPC connection to ETH backend
-var OpenRPC = func(url string) (bchain.EVMRPCClient, bchain.EVMClient, error) {
+func (b *EthereumRPC) SetMetrics(metrics *common.Metrics) {
+	b.metrics = metrics
+}
+
+func (b *EthereumRPC) observeEthCall(mode string, count int) {
+	if b.metrics == nil || count <= 0 {
+		return
+	}
+	b.metrics.EthCallRequests.With(common.Labels{"mode": mode}).Add(float64(count))
+}
+
+func (b *EthereumRPC) observeEthCallError(mode, errType string) {
+	if b.metrics == nil {
+		return
+	}
+	b.metrics.EthCallErrors.With(common.Labels{"mode": mode, "type": errType}).Inc()
+}
+
+func (b *EthereumRPC) observeEthCallBatch(size int) {
+	if b.metrics == nil || size <= 0 {
+		return
+	}
+	b.metrics.EthCallBatchSize.Observe(float64(size))
+}
+
+func (b *EthereumRPC) observeEthCallContractInfo(field string) {
+	if b.metrics == nil {
+		return
+	}
+	b.metrics.EthCallContractInfo.With(common.Labels{"field": field}).Inc()
+}
+
+func (b *EthereumRPC) observeEthCallTokenURI(method string) {
+	if b.metrics == nil {
+		return
+	}
+	b.metrics.EthCallTokenURI.With(common.Labels{"method": method}).Inc()
+}
+
+func (b *EthereumRPC) observeEthCallStakingPool(field string) {
+	if b.metrics == nil {
+		return
+	}
+	b.metrics.EthCallStakingPool.With(common.Labels{"field": field}).Inc()
+}
+
+// EnsureSameRPCHost validates that both RPC URLs point to the same host.
+func EnsureSameRPCHost(httpURL, wsURL string) error {
+	if httpURL == "" || wsURL == "" {
+		return nil
+	}
+	httpHost, err := rpcURLHost(httpURL)
+	if err != nil {
+		return errors.Annotatef(err, "rpc_url")
+	}
+	wsHost, err := rpcURLHost(wsURL)
+	if err != nil {
+		return errors.Annotatef(err, "rpc_url_ws")
+	}
+	if !strings.EqualFold(httpHost, wsHost) {
+		return errors.Errorf("rpc_url host %q and rpc_url_ws host %q must match", httpHost, wsHost)
+	}
+	return nil
+}
+
+// NormalizeRPCURLs validates HTTP and WS RPC endpoints and enforces same-host rules.
+func NormalizeRPCURLs(httpURL, wsURL string) (string, string, error) {
+	callURL := strings.TrimSpace(httpURL)
+	subURL := strings.TrimSpace(wsURL)
+	if callURL == "" {
+		return "", "", errors.New("rpc_url is empty")
+	}
+	if subURL == "" {
+		return "", "", errors.New("rpc_url_ws is empty")
+	}
+	if err := validateRPCURLScheme(callURL, "rpc_url", []string{"http", "https"}); err != nil {
+		return "", "", err
+	}
+	if err := validateRPCURLScheme(subURL, "rpc_url_ws", []string{"ws", "wss"}); err != nil {
+		return "", "", err
+	}
+	if err := EnsureSameRPCHost(callURL, subURL); err != nil {
+		return "", "", err
+	}
+	return callURL, subURL, nil
+}
+
+func validateRPCURLScheme(rawURL, field string, allowedSchemes []string) error {
+	parsed, err := url.Parse(rawURL)
+	if err != nil {
+		return errors.Annotatef(err, "%s", field)
+	}
+	scheme := strings.ToLower(parsed.Scheme)
+	if scheme == "" {
+		return errors.Errorf("%s missing scheme in %q", field, rawURL)
+	}
+	for _, allowed := range allowedSchemes {
+		if scheme == allowed {
+			return nil
+		}
+	}
+	return errors.Errorf("%s must use %s scheme: %q", field, strings.Join(allowedSchemes, " or "), rawURL)
+}
+
+func rpcURLHost(rawURL string) (string, error) {
+	parsed, err := url.Parse(rawURL)
+	if err != nil {
+		return "", err
+	}
+	host := parsed.Hostname()
+	if host == "" {
+		return "", errors.Errorf("missing host in %q", rawURL)
+	}
+	return host, nil
+}
+
+func dialRPC(rawURL string) (*rpc.Client, error) {
+	if rawURL == "" {
+		return nil, errors.New("empty rpc url")
+	}
 	opts := []rpc.ClientOption{}
-	opts = append(opts, rpc.WithWebsocketMessageSizeLimit(0))
-	r, err := rpc.DialOptions(context.Background(), url, opts...)
+	if strings.HasPrefix(rawURL, "ws://") || strings.HasPrefix(rawURL, "wss://") {
+		opts = append(opts, rpc.WithWebsocketMessageSizeLimit(0))
+	}
+	return rpc.DialOptions(context.Background(), rawURL, opts...)
+}
+
+// OpenRPC opens RPC connection to ETH backend.
+var OpenRPC = func(httpURL, wsURL string) (bchain.EVMRPCClient, bchain.EVMClient, error) {
+	callURL, subURL, err := NormalizeRPCURLs(httpURL, wsURL)
 	if err != nil {
 		return nil, nil, err
 	}
-	rc := &EthereumRPCClient{Client: r}
-	ec := &EthereumClient{Client: ethclient.NewClient(r)}
+	callClient, err := dialRPC(callURL)
+	if err != nil {
+		return nil, nil, err
+	}
+	subClient := callClient
+	if subURL != callURL {
+		subClient, err = dialRPC(subURL)
+		if err != nil {
+			callClient.Close()
+			return nil, nil, err
+		}
+	}
+	rc := &DualRPCClient{CallClient: callClient, SubClient: subClient}
+	ec := &EthereumClient{Client: ethclient.NewClient(callClient)}
 	return rc, ec, nil
 }
 
@@ -133,7 +316,7 @@ var OpenRPC = func(url string) (bchain.EVMRPCClient, bchain.EVMClient, error) {
 func (b *EthereumRPC) Initialize() error {
 	b.OpenRPC = OpenRPC
 
-	rc, ec, err := b.OpenRPC(b.ChainConfig.RPCURL)
+	rc, ec, err := b.OpenRPC(b.ChainConfig.RPCURL, b.ChainConfig.RPCURLWS)
 	if err != nil {
 		return err
 	}
@@ -243,16 +426,17 @@ func (b *EthereumRPC) InitializeMempool(addrDescForOutpoint bchain.AddrDescForOu
 }
 
 func (b *EthereumRPC) subscribeEvents() error {
+	b.newBlockNotifyOnce.Do(func() {
+		go b.newBlockNotifier()
+	})
 	// new block notifications handling
 	go func() {
 		for {
-			h, ok := b.NewBlock.Read()
+			_, ok := b.NewBlock.Read()
 			if !ok {
 				break
 			}
-			b.UpdateBestHeader(h)
-			// notify blockbook
-			b.PushHandler(bchain.NotificationNewBlock)
+			b.signalNewBlock()
 		}
 	}()
 
@@ -389,7 +573,7 @@ func (b *EthereumRPC) closeRPC() {
 func (b *EthereumRPC) reconnectRPC() error {
 	glog.Info("Reconnecting RPC")
 	b.closeRPC()
-	rc, ec, err := b.OpenRPC(b.ChainConfig.RPCURL)
+	rc, ec, err := b.OpenRPC(b.ChainConfig.RPCURL, b.ChainConfig.RPCURLWS)
 	if err != nil {
 		return err
 	}
@@ -509,11 +693,69 @@ func (b *EthereumRPC) getBestHeader() (bchain.EVMHeader, error) {
 
 // UpdateBestHeader keeps track of the latest block header confirmed on chain
 func (b *EthereumRPC) UpdateBestHeader(h bchain.EVMHeader) {
+	if h == nil || h.Number() == nil {
+		return
+	}
 	glog.V(2).Info("rpc: new block header ", h.Number().Uint64())
+	b.setBestHeader(h)
+}
+
+func (b *EthereumRPC) signalNewBlock() {
+	// Non-blocking send: one pending signal is enough to refresh the tip.
+	select {
+	case b.newBlockNotifyCh <- struct{}{}:
+	default:
+	}
+}
+
+func (b *EthereumRPC) newBlockNotifier() {
+	for range b.newBlockNotifyCh {
+		updated, err := b.refreshBestHeaderFromChain()
+		if err != nil {
+			glog.Error("refreshBestHeaderFromChain ", err)
+			continue
+		}
+		if updated {
+			b.PushHandler(bchain.NotificationNewBlock)
+		}
+	}
+}
+
+func (b *EthereumRPC) refreshBestHeaderFromChain() (bool, error) {
+	if b.Client == nil {
+		return false, errors.New("rpc client not initialized")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), b.Timeout)
+	defer cancel()
+	h, err := b.Client.HeaderByNumber(ctx, nil)
+	if err != nil {
+		return false, err
+	}
+	if h == nil || h.Number() == nil {
+		return false, errors.New("best header is nil")
+	}
+	return b.setBestHeader(h), nil
+}
+
+func (b *EthereumRPC) setBestHeader(h bchain.EVMHeader) bool {
+	if h == nil || h.Number() == nil {
+		return false
+	}
 	b.bestHeaderLock.Lock()
+	defer b.bestHeaderLock.Unlock()
+	changed := false
+	if b.bestHeader == nil || b.bestHeader.Number() == nil {
+		changed = true
+	} else {
+		prevNum := b.bestHeader.Number().Uint64()
+		newNum := h.Number().Uint64()
+		if prevNum != newNum || b.bestHeader.Hash() != h.Hash() {
+			changed = true
+		}
+	}
 	b.bestHeader = h
 	b.bestHeaderTime = time.Now()
-	b.bestHeaderLock.Unlock()
+	return changed
 }
 
 // GetBestBlockHash returns hash of the tip of the best-block-chain
@@ -716,15 +958,13 @@ func (b *EthereumRPC) processCallTrace(call *rpcCallTrace, d *bchain.EthereumInt
 	return contracts
 }
 
-// getInternalDataForBlock fetches debug trace using callTracer, extracts internal transfers and creations and destructions of contracts
-func (b *EthereumRPC) getInternalDataForBlock(blockHash string, blockHeight uint32, transactions []bchain.RpcTransaction) ([]bchain.EthereumInternalData, []bchain.ContractInfo, error) {
+// getInternalDataForBlock fetches debug trace using callTracer, extracts internal transfers/creations/destructions; ctx controls cancellation.
+func (b *EthereumRPC) getInternalDataForBlock(ctx context.Context, blockHash string, blockHeight uint32, transactions []bchain.RpcTransaction) ([]bchain.EthereumInternalData, []bchain.ContractInfo, error) {
 	data := make([]bchain.EthereumInternalData, len(transactions))
 	contracts := make([]bchain.ContractInfo, 0)
 	if ProcessInternalTransactions {
-		ctx, cancel := context.WithTimeout(context.Background(), b.Timeout)
-		defer cancel()
 		var trace []rpcTraceResult
-		err := b.RPC.CallContext(ctx, &trace, "debug_traceBlockByHash", blockHash, map[string]interface{}{"tracer": "callTracer"})
+		err := b.RPC.CallContext(ctx, &trace, "debug_traceBlockByHash", blockHash, map[string]interface{}{"tracer": "callTracer"}) // Use caller-provided ctx for timeout/cancel.
 		if err != nil {
 			glog.Error("debug_traceBlockByHash block ", blockHash, ", error ", err)
 			return data, contracts, err
@@ -798,33 +1038,62 @@ func (b *EthereumRPC) GetBlock(hash string, height uint32) (*bchain.Block, error
 	if err != nil {
 		return nil, err
 	}
-	var head rpcHeader
-	if err := json.Unmarshal(raw, &head); err != nil {
+	var block struct {
+		rpcHeader            // Embed to unmarshal header and txs in one pass.
+		rpcBlockTransactions // Embed to avoid a second JSON decode.
+	}
+	if err := json.Unmarshal(raw, &block); err != nil { // Single decode to reduce CPU overhead.
 		return nil, errors.Annotatef(err, "hash %v, height %v", hash, height)
 	}
-	var body rpcBlockTransactions
-	if err := json.Unmarshal(raw, &body); err != nil {
-		return nil, errors.Annotatef(err, "hash %v, height %v", hash, height)
-	}
+	head := block.rpcHeader
+	body := block.rpcBlockTransactions
 	bbh, err := b.ethHeaderToBlockHeader(&head)
 	if err != nil {
 		return nil, errors.Annotatef(err, "hash %v, height %v", hash, height)
 	}
-	// get block events
-	// TODO - could be possibly done in parallel to getInternalDataForBlock
-	logs, ens, err := b.processEventsForBlock(head.Number)
-	if err != nil {
-		return nil, err
+	// Run event/log processing and internal data extraction in parallel; allow early return on log failure.
+	ctxInternal, cancelInternal := context.WithTimeout(context.Background(), b.Timeout) // Cancel trace RPC on log error or timeout.
+	defer cancelInternal()                                                              // Ensure timer resources are released on any return path.
+	type logsResult struct {                                                            // Bundles processEventsForBlock outputs for channel return.
+		logs map[string][]*bchain.RpcLog
+		ens  []bchain.AddressAliasRecord
+		err  error
 	}
+	type internalResult struct { // Bundles getInternalDataForBlock outputs for channel return.
+		data      []bchain.EthereumInternalData
+		contracts []bchain.ContractInfo
+		err       error
+	}
+	logsCh := make(chan logsResult, 1)         // Buffered so send won't block if we return early.
+	internalCh := make(chan internalResult, 1) // Buffered to avoid goroutine leak on early return.
+	go func() {
+		logs, ens, err := b.processEventsForBlock(head.Number)
+		logsCh <- logsResult{logs: logs, ens: ens, err: err} // Send result without shared state.
+	}()
+	go func() {
+		data, contracts, err := b.getInternalDataForBlock(ctxInternal, head.Hash, bbh.Height, body.Transactions) // ctxInternal allows cancellation on log errors.
+		internalCh <- internalResult{data: data, contracts: contracts, err: err}                                 // Send result without shared state.
+	}()
+	logsRes := <-logsCh
+	if logsRes.err != nil {
+		// Short-circuit on log failure to preserve existing error behavior.
+		return nil, logsRes.err
+	}
+	internalRes := <-internalCh
+	// Rebind results to keep downstream logic unchanged.
+	logs := logsRes.logs
+	ens := logsRes.ens
+	internalData := internalRes.data
+	contracts := internalRes.contracts
+	internalErr := internalRes.err
 	// error fetching internal data does not stop the block processing
 	var blockSpecificData *bchain.EthereumBlockSpecificData
-	internalData, contracts, err := b.getInternalDataForBlock(head.Hash, bbh.Height, body.Transactions)
 	// pass internalData error and ENS records in blockSpecificData to be stored
-	if err != nil || len(ens) > 0 || len(contracts) > 0 {
+	if internalErr != nil || len(ens) > 0 || len(contracts) > 0 {
 		blockSpecificData = &bchain.EthereumBlockSpecificData{}
-		if err != nil {
-			blockSpecificData.InternalDataError = err.Error()
-			// glog.Info("InternalDataError ", bbh.Height, ": ", err.Error())
+		if internalErr != nil {
+			blockSpecificData.InternalDataError = internalErr.Error()
+			// glog.Info("InternalDataError ", bbh.Height, ": ", internalErr.Error())
 		}
 		if len(ens) > 0 {
 			blockSpecificData.AddressAliasRecords = ens
