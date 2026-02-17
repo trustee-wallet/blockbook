@@ -51,6 +51,11 @@ type Configuration struct {
 	RPCTimeout                      int    `json:"rpc_timeout"`
 	Erc20BatchSize                  int    `json:"erc20_batch_size,omitempty"`
 	BlockAddressesToKeep            int    `json:"block_addresses_to_keep"`
+	HotAddressMinContracts          int    `json:"hot_address_min_contracts,omitempty"`
+	HotAddressLRUCacheSize          int    `json:"hot_address_lru_cache_size,omitempty"`
+	HotAddressMinHits               int    `json:"hot_address_min_hits,omitempty"`
+	AddressContractsCacheMinSize    int    `json:"address_contracts_cache_min_size,omitempty"`
+	AddressContractsCacheMaxBytes   int64  `json:"address_contracts_cache_max_bytes,omitempty"`
 	AddressAliases                  bool   `json:"address_aliases,omitempty"`
 	MempoolTxTimeoutHours           int    `json:"mempoolTxTimeoutHours"`
 	QueryBackendOnMempoolResync     bool   `json:"queryBackendOnMempoolResync"`
@@ -87,6 +92,7 @@ type EthereumRPC struct {
 	NewTx                     bchain.EVMNewTxSubscriber
 	newTxSubscription         bchain.EVMClientSubscription
 	ChainConfig               *Configuration
+	metrics                   *common.Metrics
 	supportedStakingPools     []string
 	stakingPoolNames          []string
 	stakingPoolContracts      []string
@@ -112,6 +118,27 @@ func NewEthereumRPC(config json.RawMessage, pushHandler func(bchain.Notification
 	if c.Erc20BatchSize <= 0 {
 		c.Erc20BatchSize = defaultErc20BatchSize
 	}
+	if c.HotAddressMinContracts <= 0 {
+		c.HotAddressMinContracts = defaultHotAddressMinContracts
+	}
+	if c.HotAddressLRUCacheSize <= 0 {
+		c.HotAddressLRUCacheSize = defaultHotAddressLRUCacheSize
+	} else if c.HotAddressLRUCacheSize > maxHotAddressLRUCacheSize {
+		glog.Warningf("hot_address_lru_cache_size=%d is too large, clamping to %d", c.HotAddressLRUCacheSize, maxHotAddressLRUCacheSize)
+		c.HotAddressLRUCacheSize = maxHotAddressLRUCacheSize
+	}
+	if c.HotAddressMinHits <= 0 {
+		c.HotAddressMinHits = defaultHotAddressMinHits
+	} else if c.HotAddressMinHits > maxHotAddressMinHits {
+		glog.Warningf("hot_address_min_hits=%d is too large, clamping to %d", c.HotAddressMinHits, maxHotAddressMinHits)
+		c.HotAddressMinHits = maxHotAddressMinHits
+	}
+	if c.AddressContractsCacheMinSize <= 0 {
+		c.AddressContractsCacheMinSize = defaultAddressContractsCacheMinSize
+	}
+	if c.AddressContractsCacheMaxBytes <= 0 {
+		c.AddressContractsCacheMaxBytes = defaultAddressContractsCacheMaxBytes
+	}
 
 	s := &EthereumRPC{
 		BaseChain:   &bchain.BaseChain{},
@@ -124,10 +151,61 @@ func NewEthereumRPC(config json.RawMessage, pushHandler func(bchain.Notification
 
 	// always create parser
 	s.Parser = NewEthereumParser(c.BlockAddressesToKeep, c.AddressAliases)
+	s.Parser.HotAddressMinContracts = c.HotAddressMinContracts
+	s.Parser.HotAddressLRUCacheSize = c.HotAddressLRUCacheSize
+	s.Parser.HotAddressMinHits = c.HotAddressMinHits
+	s.Parser.AddrContractsCacheMinSize = c.AddressContractsCacheMinSize
+	s.Parser.AddrContractsCacheMaxBytes = c.AddressContractsCacheMaxBytes
 	s.Timeout = time.Duration(c.RPCTimeout) * time.Second
 	s.PushHandler = pushHandler
 
 	return s, nil
+}
+
+func (b *EthereumRPC) SetMetrics(metrics *common.Metrics) {
+	b.metrics = metrics
+}
+
+func (b *EthereumRPC) observeEthCall(mode string, count int) {
+	if b.metrics == nil || count <= 0 {
+		return
+	}
+	b.metrics.EthCallRequests.With(common.Labels{"mode": mode}).Add(float64(count))
+}
+
+func (b *EthereumRPC) observeEthCallError(mode, errType string) {
+	if b.metrics == nil {
+		return
+	}
+	b.metrics.EthCallErrors.With(common.Labels{"mode": mode, "type": errType}).Inc()
+}
+
+func (b *EthereumRPC) observeEthCallBatch(size int) {
+	if b.metrics == nil || size <= 0 {
+		return
+	}
+	b.metrics.EthCallBatchSize.Observe(float64(size))
+}
+
+func (b *EthereumRPC) observeEthCallContractInfo(field string) {
+	if b.metrics == nil {
+		return
+	}
+	b.metrics.EthCallContractInfo.With(common.Labels{"field": field}).Inc()
+}
+
+func (b *EthereumRPC) observeEthCallTokenURI(method string) {
+	if b.metrics == nil {
+		return
+	}
+	b.metrics.EthCallTokenURI.With(common.Labels{"method": method}).Inc()
+}
+
+func (b *EthereumRPC) observeEthCallStakingPool(field string) {
+	if b.metrics == nil {
+		return
+	}
+	b.metrics.EthCallStakingPool.With(common.Labels{"field": field}).Inc()
 }
 
 // EnsureSameRPCHost validates that both RPC URLs point to the same host.
