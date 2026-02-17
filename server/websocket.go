@@ -1029,8 +1029,17 @@ func (s *WebsocketServer) onNewBlockAsync(hash string, height uint32) {
 	glog.Info("broadcasting new block ", height, " ", hash, " to ", len(s.newBlockSubscriptions), " channels")
 }
 
+func setConfirmedBlockTxMetadata(tx *bchain.Tx, blockTime int64) {
+	if tx.Confirmations == 0 {
+		tx.Confirmations = 1
+		tx.Blocktime = blockTime
+		tx.Time = blockTime
+	}
+}
+
 func (s *WebsocketServer) publishNewBlockTxsByAddr(block *bchain.Block) {
 	for _, tx := range block.Txs {
+		setConfirmedBlockTxMetadata(&tx, block.Time)
 		var tokenTransfers bchain.TokenTransfers
 		var internalTransfers []bchain.EthereumInternalTransfer
 		if s.chainParser.GetChainType() == bchain.ChainEthereumType {
