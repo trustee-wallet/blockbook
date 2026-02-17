@@ -1037,6 +1037,14 @@ func setConfirmedBlockTxMetadata(tx *bchain.Tx, blockTime int64) {
 	}
 }
 
+func getEthereumInternalTransfers(tx *bchain.Tx) []bchain.EthereumInternalTransfer {
+	esd, ok := tx.CoinSpecificData.(bchain.EthereumSpecificData)
+	if !ok || esd.InternalData == nil {
+		return nil
+	}
+	return esd.InternalData.Transfers
+}
+
 func (s *WebsocketServer) publishNewBlockTxsByAddr(block *bchain.Block) {
 	for _, tx := range block.Txs {
 		setConfirmedBlockTxMetadata(&tx, block.Time)
@@ -1044,10 +1052,7 @@ func (s *WebsocketServer) publishNewBlockTxsByAddr(block *bchain.Block) {
 		var internalTransfers []bchain.EthereumInternalTransfer
 		if s.chainParser.GetChainType() == bchain.ChainEthereumType {
 			tokenTransfers, _ = s.chainParser.EthereumTypeGetTokenTransfersFromTx(&tx)
-			esd := tx.CoinSpecificData.(bchain.EthereumSpecificData)
-			if esd.InternalData != nil {
-				internalTransfers = esd.InternalData.Transfers
-			}
+			internalTransfers = getEthereumInternalTransfers(&tx)
 		}
 		vins := make([]bchain.MempoolVin, len(tx.Vin))
 		for i, vin := range tx.Vin {

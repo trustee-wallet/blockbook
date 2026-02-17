@@ -47,3 +47,35 @@ func TestSetConfirmedBlockTxMetadataLeavesConfirmedTxUnchanged(t *testing.T) {
 		t.Fatalf("Time = %d, want 200", tx.Time)
 	}
 }
+
+func TestGetEthereumInternalTransfersMissingData(t *testing.T) {
+	tx := bchain.Tx{}
+
+	transfers := getEthereumInternalTransfers(&tx)
+
+	if len(transfers) != 0 {
+		t.Fatalf("len(transfers) = %d, want 0", len(transfers))
+	}
+}
+
+func TestGetEthereumInternalTransfersReturnsTransfers(t *testing.T) {
+	expected := []bchain.EthereumInternalTransfer{
+		{From: "0x111", To: "0x222"},
+	}
+	tx := bchain.Tx{
+		CoinSpecificData: bchain.EthereumSpecificData{
+			InternalData: &bchain.EthereumInternalData{
+				Transfers: expected,
+			},
+		},
+	}
+
+	transfers := getEthereumInternalTransfers(&tx)
+
+	if len(transfers) != len(expected) {
+		t.Fatalf("len(transfers) = %d, want %d", len(transfers), len(expected))
+	}
+	if transfers[0].From != expected[0].From || transfers[0].To != expected[0].To {
+		t.Fatalf("transfers[0] = %+v, want %+v", transfers[0], expected[0])
+	}
+}
