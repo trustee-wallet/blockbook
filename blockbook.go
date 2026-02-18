@@ -545,14 +545,14 @@ func syncIndexLoop() {
 	glog.Info("syncIndexLoop starting")
 	// resync index about every 15 minutes if there are no chanSyncIndex requests, with debounce 1 second
 	common.TickAndDebounce(time.Duration(*resyncIndexPeriodMs)*time.Millisecond, debounceResyncIndexMs*time.Millisecond, chanSyncIndex, func() {
-		if err := syncWorker.ResyncIndex(onNewBlockHash, false); err != nil {
+		if err := syncWorker.ResyncIndex(onNewBlock, false); err != nil {
 			if err == db.ErrOperationInterrupted || common.IsInShutdown() {
 				return
 			}
 			glog.Error("syncIndexLoop ", errors.ErrorStack(err), ", will retry...")
 			// retry once in case of random network error, after a slight delay
 			time.Sleep(time.Millisecond * 2500)
-			if err := syncWorker.ResyncIndex(onNewBlockHash, false); err != nil {
+			if err := syncWorker.ResyncIndex(onNewBlock, false); err != nil {
 				if err == db.ErrOperationInterrupted || common.IsInShutdown() {
 					return
 				}
@@ -563,14 +563,14 @@ func syncIndexLoop() {
 	glog.Info("syncIndexLoop stopped")
 }
 
-func onNewBlockHash(hash string, height uint32) {
+func onNewBlock(block *bchain.Block) {
 	defer func() {
 		if r := recover(); r != nil {
 			glog.Error("onNewBlockHash recovered from panic: ", r)
 		}
 	}()
 	for _, c := range callbacksOnNewBlock {
-		c(hash, height)
+		c(block)
 	}
 }
 
