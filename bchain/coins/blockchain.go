@@ -435,3 +435,21 @@ func (c *mempoolWithMetrics) GetTransactionTime(txid string) uint32 {
 func (c *mempoolWithMetrics) GetTxidFilterEntries(filterScripts string, fromTimestamp uint32) (bchain.MempoolTxidFilterEntries, error) {
 	return c.mempool.GetTxidFilterEntries(filterScripts, fromTimestamp)
 }
+
+func (c *blockChainWithMetrics) ResolveENS(name string) (*bchain.ENSResolution, error) {
+	if ensResolver, ok := c.b.(interface {
+		ResolveENS(string) (*bchain.ENSResolution, error)
+	}); ok {
+		return ensResolver.ResolveENS(name)
+	}
+	return nil, errors.New("ENS resolution not supported by underlying chain")
+}
+
+func (c *blockChainWithMetrics) CheckENSExpiration(name string) (bool, error) {
+	if ensResolver, ok := c.b.(interface {
+		CheckENSExpiration(string) (bool, error)
+	}); ok {
+		return ensResolver.CheckENSExpiration(name)
+	}
+	return false, errors.New("ENS expiration check not supported by underlying chain")
+}
