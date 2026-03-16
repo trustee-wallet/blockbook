@@ -1,0 +1,65 @@
+name: Sync upstream master & tags
+
+on:
+  schedule:
+    - cron: '0 3 * * *' 
+  workflow_dispatch: 
+
+jobs:
+  sync-upstream:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout your fork's default branch
+        uses: actions/checkout@v6
+        with:
+          ref: master
+          fetch-depth: 0
+          token: ${{ secrets.GH_PAT_PUSH_TOKEN }}
+
+      - name: Set up git user
+        run: |
+          git config user.name "GitHub Actions"
+          git config user.email "actions@github.com"
+
+      - name: Add upstream remote
+        run: git remote add upstream https://github.com/trezor/blockbook.git
+
+      - name: Fetch upstream changes & tags
+        run: |
+          git fetch upstream --tags --prune
+
+      - name: Merge upstream/master into master
+        run: |
+          git checkout master
+          BEFORE=$(git rev-parse HEAD)
+          git merge --no-ff upstream/master
+
+          # Skip if merge was a no-op
+          if [ "$BEFORE" = "$(git rev-parse HEAD)" ]; then
+            echo "Already up to date."
+            exit 0
+          fi
+
+          # Restore fork's .github/ and remove any new files added by upstream
+          git checkout "$BEFORE" -- .github/ 2>/dev/null || true
+
+          ADDED=$(comm -13 \
+            <(git ls-tree -r --name-only "$BEFORE" -- .github/ 2>/dev/null | sort) \
+            <(git ls-tree -r --name-only HEAD -- .github/ 2>/dev/null | sort))
+
+          if [ -n "$ADDED" ]; then
+            echo "Removing upstream .github files:"
+            echo "$ADDED"
+            echo "$ADDED" | xargs -r git rm -f
+          fi
+
+          # Amend the merge commit if .github/ was changed
+          if ! git diff --staged --quiet 2>/dev/null; then
+            git commit --amend --no-edit
+          fi
+
+      - name: Push changes to your fork (master & tags)
+        run: |
+          git push origin master
+          git push origin --tags
