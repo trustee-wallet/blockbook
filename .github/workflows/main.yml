@@ -2,16 +2,16 @@ name: Sync upstream master & tags
 
 on:
   schedule:
-    - cron: '0 3 * * *' 
-  workflow_dispatch: 
+    - cron: '0 3 * * *'
+  workflow_dispatch:
 
 jobs:
   sync-upstream:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout your fork's default branch
-        uses: actions/checkout@v6
+      - name: Checkout fork's master branch
+        uses: actions/checkout@v4
         with:
           ref: master
           fetch-depth: 0
@@ -26,27 +26,50 @@ jobs:
         run: git remote add upstream https://github.com/trezor/blockbook.git
 
       - name: Fetch upstream changes & tags
-        run: |
-          git fetch upstream --tags --prune
+        run: git fetch upstream --tags --prune
 
-      - name: Merge upstream/master into master
+      - name: Sync master with upstream (preserve .github/)
         run: |
+          set -euo pipefail
           git checkout master
           BEFORE=$(git rev-parse HEAD)
-          git merge --no-ff upstream/master
 
-          # Skip if merge was a no-op
-          if [ "$BEFORE" = "$(git rev-parse HEAD)" ]; then
+          # Nothing to do if fork already contains all upstream commits
+          if git merge-base --is-ancestor upstream/master HEAD; then
             echo "Already up to date."
             exit 0
           fi
 
-          # Restore fork's .github/ and remove any new files added by upstream
+          # --- Try a clean merge first --------------------------------
+          if ! git merge --no-edit upstream/master; then
+            echo "::warning::Merge conflict detected — resolving automatically"
+
+            # Resolve every conflicted file:
+            #   .github/*  → keep ours (fork's version)
+            #   everything → take theirs (upstream's version)
+            git diff --name-only --diff-filter=U | while IFS= read -r file; do
+              if [[ "$file" == .github/* ]]; then
+                echo "  [keep ours]   $file"
+                git checkout --ours -- "$file" 2>/dev/null \
+                  || git rm -f -- "$file" 2>/dev/null || true
+              else
+                echo "  [take theirs] $file"
+                git checkout --theirs -- "$file" 2>/dev/null \
+                  || git rm -f -- "$file" 2>/dev/null || true
+              fi
+            done
+
+            git add -A
+            GIT_EDITOR=true git merge --continue
+          fi
+
+          # --- Restore fork's .github/ directory ----------------------
           git checkout "$BEFORE" -- .github/ 2>/dev/null || true
 
+          # Remove any .github/ files that only exist because upstream added them
           ADDED=$(comm -13 \
             <(git ls-tree -r --name-only "$BEFORE" -- .github/ 2>/dev/null | sort) \
-            <(git ls-tree -r --name-only HEAD -- .github/ 2>/dev/null | sort))
+            <(git ls-tree -r --name-only HEAD    -- .github/ 2>/dev/null | sort))
 
           if [ -n "$ADDED" ]; then
             echo "Removing upstream .github files:"
@@ -54,12 +77,12 @@ jobs:
             echo "$ADDED" | xargs -r git rm -f
           fi
 
-          # Amend the merge commit if .github/ was changed
+          # Amend the merge commit if .github/ was touched
           if ! git diff --staged --quiet 2>/dev/null; then
             git commit --amend --no-edit
           fi
 
-      - name: Push changes to your fork (master & tags)
+      - name: Push master & tags
         run: |
           git push origin master
           git push origin --tags
