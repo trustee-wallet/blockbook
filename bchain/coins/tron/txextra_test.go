@@ -46,6 +46,17 @@ func TestTronBuildExtraData_VoteWitness(t *testing.T) {
 	require.Equal(t, "3", extra.Votes[1].Count)
 }
 
+func TestTronBuildExtraData_AccountCreateOperation(t *testing.T) {
+	contract := tronTxContract{Type: "AccountCreateContract"}
+	txByID := &tronGetTransactionByIDResponse{}
+	txByID.RawData.Contract = []tronTxContract{contract}
+	txInfo := &tronGetTransactionInfoByIDResponse{}
+
+	extra := tronBuildExtraData(txByID, txInfo)
+	require.Equal(t, "AccountCreateContract", extra.ContractType)
+	require.Equal(t, "activateAccount", extra.Operation)
+}
+
 func TestTronBuildExtraData_StakeAndDelegateDetails(t *testing.T) {
 	t.Run("stake amount", func(t *testing.T) {
 		contract := tronTxContract{Type: "FreezeBalanceV2Contract"}
@@ -62,8 +73,22 @@ func TestTronBuildExtraData_StakeAndDelegateDetails(t *testing.T) {
 		require.Equal(t, "energy", extra.Resource)
 	})
 
-	t.Run("unstake amount fallback from txInfo", func(t *testing.T) {
+	t.Run("unstake amount uses contract unfreeze balance for stake 2.0", func(t *testing.T) {
+		contract := tronTxContract{Type: "UnfreezeBalanceV2Contract"}
+		contract.Parameter.Value.UnfreezeBalance = int64Ptr(99000000)
+		txByID := &tronGetTransactionByIDResponse{}
+		txByID.RawData.Contract = []tronTxContract{contract}
+
+		txInfo := &tronGetTransactionInfoByIDResponse{}
+
+		extra := tronBuildExtraData(txByID, txInfo)
+		require.Equal(t, "unfreeze", extra.Operation)
+		require.Equal(t, "99000000", extra.UnstakeAmount)
+	})
+
+	t.Run("unstake amount uses txInfo unfreeze amount for stake 1.0", func(t *testing.T) {
 		contract := tronTxContract{Type: "UnfreezeBalanceContract"}
+		contract.Parameter.Value.UnfreezeBalance = int64Ptr(11111111)
 		txByID := &tronGetTransactionByIDResponse{}
 		txByID.RawData.Contract = []tronTxContract{contract}
 
@@ -104,6 +129,20 @@ func TestTronBuildExtraData_StakeAndDelegateDetails(t *testing.T) {
 		extra := tronBuildExtraData(txByID, txInfo)
 		require.Equal(t, "votePower", extra.Resource)
 	})
+
+	t.Run("withdraw balance contract uses vote reward amount", func(t *testing.T) {
+		contract := tronTxContract{Type: "WithdrawBalanceContract"}
+		txByID := &tronGetTransactionByIDResponse{}
+		txByID.RawData.Contract = []tronTxContract{contract}
+		txInfo := &tronGetTransactionInfoByIDResponse{
+			WithdrawAmount: int64Ptr(6500000),
+		}
+
+		extra := tronBuildExtraData(txByID, txInfo)
+		require.Equal(t, "voteRewardAmount", extra.Operation)
+		require.Equal(t, "6500000", extra.ClaimedVoteReward)
+	})
+
 }
 
 func TestTronBuildExtraData_AssetIssueID(t *testing.T) {
@@ -154,9 +193,19 @@ func TestTronBuildRpcTransaction_ValueIsEthereumHexQuantity(t *testing.T) {
 			want:     0,
 		},
 		{
-			name:     "delegate balance integer",
+			name:     "trc10 transfer has no trx tx value",
+			contract: tronTxContract{Type: "TransferAssetContract"},
+			want:     0,
+		},
+		{
+			name:     "delegate resource has no trx tx value",
 			contract: tronTxContract{Type: "DelegateResourceContract"},
-			want:     88000000,
+			want:     0,
+		},
+		{
+			name:     "undelegate resource has no trx tx value",
+			contract: tronTxContract{Type: "UnDelegateResourceContract"},
+			want:     0,
 		},
 	}
 
@@ -165,6 +214,7 @@ func TestTronBuildRpcTransaction_ValueIsEthereumHexQuantity(t *testing.T) {
 	tests[2].contract.Parameter.Value.FrozenBalance = int64Ptr(42000000)
 	tests[3].contract.Parameter.Value.UnfreezeBalance = int64Ptr(77000000)
 	tests[5].contract.Parameter.Value.Balance = int64Ptr(88000000)
+	tests[6].contract.Parameter.Value.Balance = int64Ptr(99000000)
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -182,6 +232,48 @@ func TestTronBuildRpcTransaction_ValueIsEthereumHexQuantity(t *testing.T) {
 			require.Equal(t, tt.want, value.Int64())
 		})
 	}
+}
+
+func TestTronBuildRpcTransaction_AccountCreateContractSetsToAddress(t *testing.T) {
+	contract := tronTxContract{Type: "AccountCreateContract"}
+	contract.Parameter.Value.OwnerAddress = "41508b7b8057fc9170398a65bbc89ff3ccfcc0f4a5"
+	contract.Parameter.Value.AccountAddress = "41da79e32a568680fccedadcab18a6e1bc231c0476"
+
+	txByID := &tronGetTransactionByIDResponse{
+		TxID: "e5babca390bfb5ba2e26151f031893f5b01237536fbd700f5f563423a1dc1b7d",
+	}
+	txByID.RawData.Contract = []tronTxContract{contract}
+
+	txInfo := &tronGetTransactionInfoByIDResponse{
+		BlockNumber: int64Ptr(1),
+	}
+
+	tx := tronBuildRpcTransaction(txByID, txInfo)
+
+	require.Equal(t, ToTronAddressFromAddress(contract.Parameter.Value.OwnerAddress), tx.From)
+	require.Equal(t, contract.Parameter.Value.AccountAddress, tx.To)
+	require.Equal(t, "0x0", tx.Value)
+}
+
+func TestTronBuildRpcTransaction_WithdrawExpireUnfreezeSetsToAndValue(t *testing.T) {
+	contract := tronTxContract{Type: "WithdrawExpireUnfreezeContract"}
+	contract.Parameter.Value.OwnerAddress = "41da727d310b98700af4cec797e43991899668d6f3"
+	contract.Parameter.Value.ReceiverAddress = "41734c2f23ab41c52308d1206c4eb5fe8e124e6898"
+
+	txByID := &tronGetTransactionByIDResponse{}
+	txByID.RawData.Contract = []tronTxContract{contract}
+	txByID.TxID = "25b18a55f86afb10e7aca38d0073d04c80397c6636069193953fdefaea0b8369"
+	txInfo := &tronGetTransactionInfoByIDResponse{
+		BlockNumber:          int64Ptr(1),
+		WithdrawExpireAmount: int64Ptr(88000000),
+	}
+
+	tx := tronBuildRpcTransaction(txByID, txInfo)
+	value, err := hexutil.DecodeBig(tx.Value)
+
+	require.NoError(t, err)
+	require.Equal(t, int64(88000000), value.Int64())
+	require.Equal(t, contract.Parameter.Value.ReceiverAddress, tx.To)
 }
 
 func TestTronGetTransactionInfoByIDResponse_IgnoresCancelUnfreezeV2AmountShape(t *testing.T) {
