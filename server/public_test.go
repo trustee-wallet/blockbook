@@ -2779,3 +2779,56 @@ func Test_sanitizePagingParams(t *testing.T) {
 		})
 	}
 }
+
+func Test_sanitizeAccountPagingParams(t *testing.T) {
+	tests := []struct {
+		name            string
+		page            int
+		pageSize        int
+		defaultPageSize int
+		maxPageSize     int
+		wantPage        int
+		wantPageSize    int
+	}{
+		{"ws getAccountInfo default", 0, 0, txsOnPage, txsInAPI, 0, txsOnPage},
+		{"ws getAccountInfo within limit", 1, 100, txsOnPage, txsInAPI, 1, 100},
+		{"ws getAccountInfo caps page size at txsInAPI", 1, txsInAPI + 1, txsOnPage, txsInAPI, 1, txsInAPI},
+		{"ws getAccountInfo negative defaults", 0, -5, txsOnPage, txsInAPI, 0, txsOnPage},
+		{"api address caps history offset", maxPageNumber, txsInAPI, txsInAPI, txsInAPI, maxAccountHistoryPagingOffset / txsInAPI, txsInAPI},
+		{"explorer address caps history offset", maxPageNumber, txsOnPage, txsOnPage, txsOnPage, maxAccountHistoryPagingOffset / txsOnPage, txsOnPage},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			page, pageSize := sanitizeAccountPagingParams(tt.page, tt.pageSize, tt.defaultPageSize, tt.maxPageSize)
+			if page != tt.wantPage || pageSize != tt.wantPageSize {
+				t.Errorf("sanitizeAccountPagingParams(%d, %d, %d, %d) = (%d, %d), want (%d, %d)",
+					tt.page, tt.pageSize, tt.defaultPageSize, tt.maxPageSize,
+					page, pageSize, tt.wantPage, tt.wantPageSize)
+			}
+		})
+	}
+}
+
+func Test_validateIntValue_gapClamp(t *testing.T) {
+	// Mirrors the WS getAccountInfo gap clamp: validateIntValue(req.Gap, 0, 0, maxGapValue).
+	tests := []struct {
+		name string
+		val  int
+		want int
+	}{
+		{"unset passes through as 0", 0, 0},
+		{"suite default 20 passes through", 20, 20},
+		{"negative defaults to 0", -1, 0},
+		{"caps at maxGapValue", maxGapValue + 1, maxGapValue},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := validateIntValue(tt.val, 0, 0, maxGapValue)
+			if got != tt.want {
+				t.Errorf("validateIntValue(%d, 0, 0, %d) = %d, want %d",
+					tt.val, maxGapValue, got, tt.want)
+			}
+		})
+	}
+}
