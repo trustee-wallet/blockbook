@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"math/big"
 	"net/url"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -142,6 +143,182 @@ func testGetContractInfoEVM(t *testing.T, h *TestHandler) {
 		h.mustGetJSON(t, path, &resp)
 		return resp
 	})
+}
+
+// testGetContractInfoOptInEVM verifies that getContractInfo without
+// ?protocols= returns no protocols.erc4626 payload. Pure request-shape gate;
+// the assertion is independent of vault state, so deterministic across blocks.
+func testGetContractInfoOptInEVM(t *testing.T, h *TestHandler) {
+	td, err := loadAPITestData(h.Coin)
+	if err != nil {
+		t.Fatalf("load api test data for %s: %v", h.Coin, err)
+	}
+	if len(td.ERC4626Fixtures) == 0 {
+		t.Skipf("api/testdata/%s.json has no erc4626Fixtures entries", h.Coin)
+	}
+
+	for _, fixture := range td.ERC4626Fixtures {
+		t.Run(fixture.Name, func(t *testing.T) {
+			path := "/api/v2/contract/" + url.PathEscape(fixture.Contract)
+			var resp evmContractInfoResponse
+			h.mustGetJSON(t, path, &resp)
+
+			if !strings.EqualFold(resp.Contract, fixture.Contract) {
+				t.Fatalf("contract mismatch: got %s want %s", resp.Contract, fixture.Contract)
+			}
+			if resp.Protocols != nil && resp.Protocols.Erc4626 != nil {
+				t.Fatalf("opt-in gate broken: vault %s leaked protocols.erc4626 without ?protocols= request", fixture.Contract)
+			}
+		})
+	}
+}
+
+// testGetAddressProtocolsOptInEVM verifies that getAccountInfo without
+// ?protocols= returns tokens with no protocols field set. Like the
+// getContractInfo opt-in test, this is pure request-shape — the holder's
+// balances or vault state cannot make it false-positive.
+func testGetAddressProtocolsOptInEVM(t *testing.T, h *TestHandler) {
+	td, err := loadAPITestData(h.Coin)
+	if err != nil {
+		t.Fatalf("load api test data for %s: %v", h.Coin, err)
+	}
+	if len(td.ERC4626Fixtures) == 0 {
+		t.Skipf("api/testdata/%s.json has no erc4626Fixtures entries", h.Coin)
+	}
+
+	validatedFixtures := 0
+
+	for _, fixture := range td.ERC4626Fixtures {
+		t.Run(fixture.Name, func(t *testing.T) {
+			path := buildAddressDetailsPath(fixture.Holder, "tokenBalances", addressPage, addressPageSize) +
+				"&contract=" + url.QueryEscape(fixture.Contract)
+			var resp evmAddressTokenBalanceResponse
+			h.mustGetJSON(t, path, &resp)
+
+			assertAddressMatches(t, resp.Address, fixture.Holder, "GetAddressProtocolsOptInEVM.address")
+			if len(resp.Tokens) == 0 {
+				t.Skipf("fixture %s returned no tokens for contract %s", fixture.Name, fixture.Contract)
+			}
+
+			for i := range resp.Tokens {
+				if len(resp.Tokens[i].Protocols) > 0 {
+					t.Fatalf("opt-in gate broken: tokens[%d].protocols=%v without ?protocols= request",
+						i, resp.Tokens[i].Protocols)
+				}
+			}
+
+			validatedFixtures++
+		})
+	}
+
+	if validatedFixtures == 0 {
+		t.Fatalf("GetAddressProtocolsOptInEVM did not validate any ERC4626 fixture")
+	}
+}
+
+// testGetContractInfoNonVaultEVM verifies the strict detection gate: querying
+// known non-vault contracts (USDC, USDT, …) with ?protocols=erc4626 must NOT
+// produce a protocols.erc4626 payload. Guards against a regression where the
+// gate accepts any contract that exposes asset() (or totalAssets()) alone.
+func testGetContractInfoNonVaultEVM(t *testing.T, h *TestHandler) {
+	td, err := loadAPITestData(h.Coin)
+	if err != nil {
+		t.Fatalf("load api test data for %s: %v", h.Coin, err)
+	}
+	if len(td.NonVaultContracts) == 0 {
+		t.Skipf("api/testdata/%s.json has no nonVaultContracts entries", h.Coin)
+	}
+
+	for _, contract := range td.NonVaultContracts {
+		t.Run(contract, func(t *testing.T) {
+			path := "/api/v2/contract/" + url.PathEscape(contract) + "?protocols=erc4626"
+			var resp evmContractInfoResponse
+			h.mustGetJSON(t, path, &resp)
+
+			if !strings.EqualFold(resp.Contract, contract) {
+				t.Fatalf("contract mismatch: got %s want %s", resp.Contract, contract)
+			}
+			if resp.Protocols != nil && resp.Protocols.Erc4626 != nil {
+				t.Fatalf("strict-gate regression: non-vault %s returned protocols.erc4626", contract)
+			}
+		})
+	}
+}
+
+// testErc4626FeeInvariantEVM asserts that for every fixture vault:
+//
+//	convertToAssets(1share) ≥ previewRedeem(1share)
+//	convertToShares(1asset) ≥ previewDeposit(1asset)
+//
+// previewRedeem includes any redemption fee (so it can only be ≤ the
+// fee-less convertToAssets); previewDeposit symmetrically. Equal for fee-less
+// vaults like sDAI; strict inequality for vaults with fees. The relation
+// holds at every block irrespective of TVL or yield, so deterministic.
+func testErc4626FeeInvariantEVM(t *testing.T, h *TestHandler) {
+	td, err := loadAPITestData(h.Coin)
+	if err != nil {
+		t.Fatalf("load api test data for %s: %v", h.Coin, err)
+	}
+	if len(td.ERC4626Fixtures) == 0 {
+		t.Skipf("api/testdata/%s.json has no erc4626Fixtures entries", h.Coin)
+	}
+
+	for _, fixture := range td.ERC4626Fixtures {
+		t.Run(fixture.Name, func(t *testing.T) {
+			path := "/api/v2/contract/" + url.PathEscape(fixture.Contract) + "?protocols=erc4626"
+			var resp evmContractInfoResponse
+			h.mustGetJSON(t, path, &resp)
+
+			if resp.Protocols == nil || resp.Protocols.Erc4626 == nil {
+				t.Fatalf("missing erc4626 payload for %s", fixture.Contract)
+			}
+			p := resp.Protocols.Erc4626
+
+			assertFeeInvariantGE(t, p.ConvertToAssets1Share, p.PreviewRedeem1Share,
+				fixture.Contract+": convertToAssets1Share ≥ previewRedeem1Share")
+			assertFeeInvariantGE(t, p.ConvertToShares1Asset, p.PreviewDeposit1Asset,
+				fixture.Contract+": convertToShares1Asset ≥ previewDeposit1Asset")
+		})
+	}
+}
+
+func parseOptionalNonNegativeDecimalBigInt(t *testing.T, value, field, context string) (*big.Int, bool) {
+	t.Helper()
+
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return nil, false
+	}
+	for _, r := range value {
+		if r < '0' || r > '9' {
+			t.Fatalf("%s: %s not a valid non-negative decimal integer: %s", context, field, value)
+		}
+	}
+	n, ok := new(big.Int).SetString(value, 10)
+	if !ok {
+		t.Fatalf("%s: %s not a valid non-negative decimal integer: %s", context, field, value)
+	}
+	return n, true
+}
+
+// assertFeeInvariantGE checks lhs ≥ rhs as big integers. Empty operands are
+// silently tolerated since the conversion fields are optional in the
+// response (a vault with malformed share/asset decimals may legitimately
+// omit them).
+func assertFeeInvariantGE(t *testing.T, lhs, rhs, context string) {
+	t.Helper()
+
+	a, ok := parseOptionalNonNegativeDecimalBigInt(t, lhs, "lhs", context)
+	if !ok {
+		return
+	}
+	b, ok := parseOptionalNonNegativeDecimalBigInt(t, rhs, "rhs", context)
+	if !ok {
+		return
+	}
+	if a.Cmp(b) < 0 {
+		t.Fatalf("%s violated: %s < %s", context, strings.TrimSpace(lhs), strings.TrimSpace(rhs))
+	}
 }
 
 func testGetAddressContractFilterEVM(t *testing.T, h *TestHandler) {
@@ -376,10 +553,9 @@ func assertErc4626FixturesInAccountInfo(t *testing.T, h *TestHandler, testName s
 				if !strings.EqualFold(token.Contract, fixture.Contract) {
 					t.Fatalf("%s contract mismatch: got %s want %s", context, token.Contract, fixture.Contract)
 				}
-				if token.Protocols == nil || token.Protocols.Erc4626 == nil {
-					t.Fatalf("%s missing erc4626 payload for known ERC4626 contract %s", context, fixture.Contract)
+				if !slices.Contains(token.Protocols, "erc4626") {
+					t.Fatalf("%s missing erc4626 in protocols for known ERC4626 contract %s, got %v", context, fixture.Contract, token.Protocols)
 				}
-				assertErc4626Payload(t, context+".protocols.erc4626", fixture.Contract, token.Protocols.Erc4626)
 			}
 
 			validatedFixtures++
