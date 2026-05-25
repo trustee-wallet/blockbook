@@ -7,6 +7,8 @@ import (
 	"math/big"
 	"os"
 	"reflect"
+	"strconv"
+	"strings"
 	"testing"
 
 	"github.com/martinboehm/btcutil/chaincfg"
@@ -17,6 +19,22 @@ func TestMain(m *testing.M) {
 	c := m.Run()
 	chaincfg.ResetParams()
 	os.Exit(c)
+}
+
+func testChangeList(count int, separator string) string {
+	changes := make([]string, count)
+	for i := range changes {
+		changes[i] = strconv.Itoa(i)
+	}
+	return strings.Join(changes, separator)
+}
+
+func testChangeIndexes(count int) []uint32 {
+	indexes := make([]uint32, count)
+	for i := range indexes {
+		indexes[i] = uint32(i)
+	}
+	return indexes
 }
 
 func TestGetAddrDescFromAddress(t *testing.T) {
@@ -781,11 +799,12 @@ func TestParseXpubDescriptors(t *testing.T) {
 	btcMainParser := NewBitcoinParser(GetChainParams("main"), &Configuration{XPubMagic: 76067358, XPubMagicSegwitP2sh: 77429938, XPubMagicSegwitNative: 78792518})
 	btcTestnetParser := NewBitcoinParser(GetChainParams("test"), &Configuration{XPubMagic: 70617039, XPubMagicSegwitP2sh: 71979618, XPubMagicSegwitNative: 73342198})
 	tests := []struct {
-		name    string
-		xpub    string
-		parser  *BitcoinParser
-		want    *bchain.XpubDescriptor
-		wantErr bool
+		name            string
+		xpub            string
+		parser          *BitcoinParser
+		want            *bchain.XpubDescriptor
+		wantErr         bool
+		wantErrContains string
 	}{
 		{
 			name:   "tpub",
@@ -846,6 +865,32 @@ func TestParseXpubDescriptors(t *testing.T) {
 				Bip:            "86",
 				ChangeIndexes:  []uint32{0, 1, 2},
 			},
+		},
+		{
+			name:   "tr([5c9e228d/86'/1'/0']tpubD/{max changes}/*)#4rqwxvej",
+			xpub:   "tr([5c9e228d/86'/1'/0']tpubDC88gkaZi5HvJGxGDNLADkvtdpni3mLmx6vr2KnXmWMG8zfkBRggsxHVBkUpgcwPe2KKpkyvTJCdXHb1UHEWE64vczyyPQfHr1skBcsRedN/{" + testChangeList(bchain.MaxXpubChangeIndexes, ",") + "}/*)#4rqwxvej",
+			parser: btcTestnetParser,
+			want: &bchain.XpubDescriptor{
+				XpubDescriptor: "tr([5c9e228d/86'/1'/0']tpubDC88gkaZi5HvJGxGDNLADkvtdpni3mLmx6vr2KnXmWMG8zfkBRggsxHVBkUpgcwPe2KKpkyvTJCdXHb1UHEWE64vczyyPQfHr1skBcsRedN/{" + testChangeList(bchain.MaxXpubChangeIndexes, ",") + "}/*)#4rqwxvej",
+				Xpub:           "tpubDC88gkaZi5HvJGxGDNLADkvtdpni3mLmx6vr2KnXmWMG8zfkBRggsxHVBkUpgcwPe2KKpkyvTJCdXHb1UHEWE64vczyyPQfHr1skBcsRedN",
+				Type:           bchain.P2TR,
+				Bip:            "86",
+				ChangeIndexes:  testChangeIndexes(bchain.MaxXpubChangeIndexes),
+			},
+		},
+		{
+			name:            "tr([5c9e228d/86'/1'/0']tpubD/{too many changes}/*)#4rqwxvej error - change list limit",
+			xpub:            "tr([5c9e228d/86'/1'/0']tpubDC88gkaZi5HvJGxGDNLADkvtdpni3mLmx6vr2KnXmWMG8zfkBRggsxHVBkUpgcwPe2KKpkyvTJCdXHb1UHEWE64vczyyPQfHr1skBcsRedN/{" + testChangeList(bchain.MaxXpubChangeIndexes+1, ",") + "}/*)#4rqwxvej",
+			parser:          btcTestnetParser,
+			wantErr:         true,
+			wantErrContains: "change index count exceeds limit",
+		},
+		{
+			name:            "tr([5c9e228d/86'/1'/0']tpubD/<too many changes>/*)#4rqwxvej error - change list limit",
+			xpub:            "tr([5c9e228d/86'/1'/0']tpubDC88gkaZi5HvJGxGDNLADkvtdpni3mLmx6vr2KnXmWMG8zfkBRggsxHVBkUpgcwPe2KKpkyvTJCdXHb1UHEWE64vczyyPQfHr1skBcsRedN/<" + testChangeList(bchain.MaxXpubChangeIndexes+1, ";") + ">/*)#4rqwxvej",
+			parser:          btcTestnetParser,
+			wantErr:         true,
+			wantErrContains: "change index count exceeds limit",
 		},
 		{
 			name:   "tr([5c9e228d/86'/1'/0']tpubD/3/*)#4rqwxvej",
@@ -980,6 +1025,9 @@ func TestParseXpubDescriptors(t *testing.T) {
 			if (err != nil) != tt.wantErr {
 				t.Errorf("ParseXpub() error = %v, wantErr %v", err, tt.wantErr)
 				return
+			}
+			if err != nil && tt.wantErrContains != "" && !strings.Contains(err.Error(), tt.wantErrContains) {
+				t.Errorf("ParseXpub() error = %v, want error containing %q", err, tt.wantErrContains)
 			}
 			if err == nil {
 				if got.ExtKey == nil {

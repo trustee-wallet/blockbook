@@ -21,6 +21,7 @@ import (
 	"github.com/gorilla/websocket"
 	"github.com/linxGnu/grocksdb"
 	"github.com/martinboehm/btcutil/chaincfg"
+	"github.com/trezor/blockbook/api"
 	"github.com/trezor/blockbook/bchain"
 	"github.com/trezor/blockbook/bchain/coins/btc"
 	"github.com/trezor/blockbook/common"
@@ -773,6 +774,15 @@ func httpTestsBitcoinType(t *testing.T, ts *httptest.Server) {
 			contentType: "application/json; charset=utf-8",
 			body: []string{
 				`{"error":"Parameter 'timestamp' does not contain a valid Unix timestamp."}`,
+			},
+		},
+		{
+			name:        "apiMultiFiatRates timestamp limit",
+			r:           newGetRequest(ts.URL + "/api/v2/multi-tickers?timestamp=" + strings.Repeat("1,", api.MaxFiatRatesTimestamps) + "1&currency=usd"),
+			status:      http.StatusBadRequest,
+			contentType: "application/json; charset=utf-8",
+			body: []string{
+				`{"error":"too many timestamps, max ` + strconv.Itoa(api.MaxFiatRatesTimestamps) + `"}`,
 			},
 		},
 		{
@@ -1702,6 +1712,17 @@ var websocketTestsBitcoinType = []websocketTest{
 			},
 		},
 		want: `{"id":"44","data":{"error":{"message":"not supported"}}}`,
+	},
+	{
+		name: "websocket getFiatRatesForTimestamps timestamp limit",
+		req: websocketReq{
+			Method: "getFiatRatesForTimestamps",
+			Params: map[string]interface{}{
+				"currencies": []string{"usd"},
+				"timestamps": make([]int64, api.MaxFiatRatesTimestamps+1),
+			},
+		},
+		want: `{"id":"45","data":{"error":{"message":"too many timestamps, max ` + strconv.Itoa(api.MaxFiatRatesTimestamps) + `"}}}`,
 	},
 }
 
@@ -2667,6 +2688,27 @@ func Test_validateIntValue_gapClamp(t *testing.T) {
 			if got != tt.want {
 				t.Errorf("validateIntValue(%d, 0, 0, %d) = %d, want %d",
 					tt.val, maxGapValue, got, tt.want)
+			}
+		})
+	}
+}
+
+func Test_countCommaSeparatedValues(t *testing.T) {
+	tests := []struct {
+		name  string
+		value string
+		limit int
+		want  int
+	}{
+		{"empty string", "", api.MaxFiatRatesTimestamps, 0},
+		{"single value", "1", api.MaxFiatRatesTimestamps, 1},
+		{"stops after limit exceeded", "1,2,3", 2, 3},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := countCommaSeparatedValues(tt.value, tt.limit); got != tt.want {
+				t.Errorf("countCommaSeparatedValues(%q, %d) = %d, want %d", tt.value, tt.limit, got, tt.want)
 			}
 		})
 	}
