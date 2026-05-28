@@ -1805,6 +1805,74 @@ func setupChain(t *testing.T) (bchain.BlockChainParser, bchain.BlockChain) {
 	return parser, chain
 }
 
+func Test_PublicServer_OpenAPIDocs(t *testing.T) {
+	parser, chain := setupChain(t)
+
+	s, dbpath := setupPublicHTTPServer(parser, chain, t, false)
+	defer closeAndDestroyPublicServer(t, s, dbpath)
+	ts := httptest.NewServer(s.https.Handler)
+	defer ts.Close()
+
+	get := func(endpoint string) *http.Response {
+		t.Helper()
+		resp, err := http.DefaultClient.Do(newGetRequest(ts.URL + endpoint))
+		if err != nil {
+			t.Fatal(err)
+		}
+		return resp
+	}
+
+	resp := get("/api-docs/")
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("/api-docs/ StatusCode = %v, want %v", resp.StatusCode, http.StatusOK)
+	}
+	if ct := resp.Header.Get("Content-Type"); ct != "text/html; charset=utf-8" {
+		t.Fatalf("/api-docs/ Content-Type = %q", ct)
+	}
+	csp := resp.Header.Get("Content-Security-Policy")
+	if !strings.Contains(csp, "script-src 'self' https://cdn.jsdelivr.net;") {
+		t.Fatalf("Swagger CSP missing CDN in script-src: %q", csp)
+	}
+	if strings.Contains(csp, "script-src 'self' 'unsafe-inline'") {
+		t.Fatalf("Swagger CSP must not allow unsafe-inline in script-src: %q", csp)
+	}
+	if v := resp.Header.Get("X-Content-Type-Options"); v != "nosniff" {
+		t.Fatalf("X-Content-Type-Options = %q, want nosniff", v)
+	}
+
+	for _, p := range []string{"/api-docs/openapi.yaml", "/openapi.yaml"} {
+		r := get(p)
+		body, _ := io.ReadAll(r.Body)
+		r.Body.Close()
+		if r.StatusCode != http.StatusOK {
+			t.Fatalf("%s StatusCode = %v", p, r.StatusCode)
+		}
+		if ct := r.Header.Get("Content-Type"); ct != "application/yaml; charset=utf-8" {
+			t.Fatalf("%s Content-Type = %q", p, ct)
+		}
+		if !strings.Contains(string(body), "openapi: 3.1.0") {
+			t.Fatalf("%s body missing openapi: 3.1.0", p)
+		}
+	}
+
+	req, err := http.NewRequest(http.MethodPost, ts.URL+"/openapi.yaml", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	r, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	r.Body.Close()
+	if r.StatusCode != http.StatusMethodNotAllowed {
+		t.Fatalf("POST /openapi.yaml StatusCode = %v, want %v", r.StatusCode, http.StatusMethodNotAllowed)
+	}
+	if allow := r.Header.Get("Allow"); allow != "GET, HEAD" {
+		t.Fatalf("POST /openapi.yaml Allow = %q, want %q", allow, "GET, HEAD")
+	}
+}
+
 func Test_PublicServer_BitcoinType(t *testing.T) {
 	parser, chain := setupChain(t)
 

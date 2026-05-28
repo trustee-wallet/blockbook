@@ -42,6 +42,23 @@ func (b *BitcoinRPC) SetMetrics(metrics *common.Metrics) {
 	b.metrics = metrics
 }
 
+// AverageBlockTimeDuration exposes the chain's nominal block cadence so the
+// blockbook_average_block_time_seconds gauge can normalize tip-age alerts
+// across coins. Returns an error if the config didn't set averageBlockTimeMs.
+func (b *BitcoinRPC) AverageBlockTimeDuration() (time.Duration, error) {
+	return b.ChainConfig.AverageBlockTimeDuration()
+}
+
+// MissingBlockRetryOverride exposes the per-chain sync-worker retry override
+// (or nil to use built-in defaults). Consumed by blockbook.go at SyncWorker
+// construction via a duck-typed interface assertion.
+func (b *BitcoinRPC) MissingBlockRetryOverride() *bchain.MissingBlockRetry {
+	if b.ChainConfig == nil {
+		return nil
+	}
+	return b.ChainConfig.MissingBlockRetry
+}
+
 // Configuration represents json config file
 type Configuration struct {
 	CoinName                     string `json:"coin_name"`
@@ -71,6 +88,23 @@ type Configuration struct {
 	MempoolGolombFilterP         uint8  `json:"mempool_golomb_filter_p,omitempty"`
 	MempoolFilterScripts         string `json:"mempool_filter_scripts,omitempty"`
 	MempoolFilterUseZeroedKey    bool   `json:"mempool_filter_use_zeroed_key,omitempty"`
+	// AverageBlockTimeMs is the chain's nominal block cadence in ms.
+	// Optional on UTXO chains; when set it is exposed as the
+	// blockbook_average_block_time_seconds gauge for alert normalization.
+	AverageBlockTimeMs int `json:"averageBlockTimeMs,omitempty"`
+	// MissingBlockRetry overrides the sync-worker missing-block retry policy
+	// per chain. All fields are optional; missing fields use built-in defaults.
+	MissingBlockRetry *bchain.MissingBlockRetry `json:"missingBlockRetry,omitempty"`
+}
+
+// AverageBlockTimeDuration returns AverageBlockTimeMs as a time.Duration.
+// Returns an error when unset so callers can distinguish "no configured cadence"
+// from a real zero — matching the EVM Configuration helper.
+func (c *Configuration) AverageBlockTimeDuration() (time.Duration, error) {
+	if c.AverageBlockTimeMs <= 0 {
+		return 0, errors.Errorf("averageBlockTimeMs must be a positive integer")
+	}
+	return time.Duration(c.AverageBlockTimeMs) * time.Millisecond, nil
 }
 
 // NewBitcoinRPC returns new BitcoinRPC instance.

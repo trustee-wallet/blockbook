@@ -35,6 +35,9 @@ type Metrics struct {
 	EthCallTokenURI                   *prometheus.CounterVec
 	EthCallStakingPool                *prometheus.CounterVec
 	IndexResyncErrors                 *prometheus.CounterVec
+	IndexBlockNotFoundRetries         prometheus.Counter
+	IndexReorgEvents                  *prometheus.CounterVec
+	IndexSyncYields                   *prometheus.CounterVec
 	IndexDBSize                       prometheus.Gauge
 	ExplorerViews                     *prometheus.CounterVec
 	MempoolSize                       prometheus.Gauge
@@ -51,6 +54,8 @@ type Metrics struct {
 	DbColumnSize                      *prometheus.GaugeVec
 	BlockbookAppInfo                  *prometheus.GaugeVec
 	BackendBestHeight                 prometheus.Gauge
+	BackendTipAgeSeconds              prometheus.Gauge
+	AverageBlockTimeSeconds           prometheus.Gauge
 	BlockbookBestHeight               prometheus.Gauge
 	ExplorerPendingRequests           *prometheus.GaugeVec
 	WebsocketPendingRequests          *prometheus.GaugeVec
@@ -59,6 +64,7 @@ type Metrics struct {
 	CoingeckoRangeRequests            *prometheus.CounterVec
 	FiatRatesUpdateDuration           *prometheus.HistogramVec
 	AlternativeFeeProviderRequests    *prometheus.CounterVec
+	EthSyncRpcErrors                  *prometheus.CounterVec
 }
 
 // Labels represents a collection of label name -> value mappings.
@@ -288,6 +294,29 @@ func GetMetrics(coin string) (*Metrics, error) {
 		},
 		[]string{"error"},
 	)
+	metrics.IndexBlockNotFoundRetries = prometheus.NewCounter(
+		prometheus.CounterOpts{
+			Name:        "blockbook_index_block_not_found_retries",
+			Help:        "Number of transient ErrBlockNotFound responses from the backend during sync (load-balanced RPC routing skew, indexer ahead of backend, etc.)",
+			ConstLabels: Labels{"coin": coin},
+		},
+	)
+	metrics.IndexReorgEvents = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name:        "blockbook_index_reorg_events",
+			Help:        "Chain reorganization events detected during sync, by detection path (fork: in-stream prevHash mismatch; resync: missing block hash triggered sync restart; disconnect: local-best fork triggered DB rollback)",
+			ConstLabels: Labels{"coin": coin},
+		},
+		[]string{"type"},
+	)
+	metrics.IndexSyncYields = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name:        "blockbook_index_sync_yields",
+			Help:        "Number of times sync yielded to the outer resync machinery for non-reorg reasons (reason=deadline: MaxStallDuration elapsed in retry loop; reason=probe_failed: chain-state probe failed for the configured streak)",
+			ConstLabels: Labels{"coin": coin},
+		},
+		[]string{"reason"},
+	)
 	metrics.IndexDBSize = prometheus.NewGauge(
 		prometheus.GaugeOpts{
 			Name:        "blockbook_index_db_size",
@@ -415,6 +444,20 @@ func GetMetrics(coin string) (*Metrics, error) {
 			ConstLabels: Labels{"coin": coin},
 		},
 	)
+	metrics.BackendTipAgeSeconds = prometheus.NewGauge(
+		prometheus.GaugeOpts{
+			Name:        "blockbook_tip_age_seconds",
+			Help:        "Seconds since the backend's best height was last observed to advance",
+			ConstLabels: Labels{"coin": coin},
+		},
+	)
+	metrics.AverageBlockTimeSeconds = prometheus.NewGauge(
+		prometheus.GaugeOpts{
+			Name:        "blockbook_average_block_time_seconds",
+			Help:        "Configured average block time for the chain in seconds (0 if unavailable)",
+			ConstLabels: Labels{"coin": coin},
+		},
+	)
 	metrics.ExplorerPendingRequests = prometheus.NewGaugeVec(
 		prometheus.GaugeOpts{
 			Name:        "blockbook_explorer_pending_requests",
@@ -470,6 +513,14 @@ func GetMetrics(coin string) (*Metrics, error) {
 			ConstLabels: Labels{"coin": coin},
 		},
 		[]string{"provider", "status"},
+	)
+	metrics.EthSyncRpcErrors = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name:        "blockbook_eth_sync_rpc_errors",
+			Help:        "Total number of failed Ethereum sync RPC calls by method and status (timeout, http_4xx, http_5xx, http_other, rpc, error)",
+			ConstLabels: Labels{"coin": coin},
+		},
+		[]string{"method", "status"},
 	)
 
 	v := reflect.ValueOf(metrics)
