@@ -47,6 +47,13 @@ const (
 const (
 	defaultErc20BatchSize = 100
 
+	// defaultRPCTimeoutSeconds is used when rpc_timeout is unset or non-positive.
+	// A zero b.Timeout makes context.WithTimeout expire immediately (breaking every
+	// call), so a finite floor is enforced rather than trusting the config. Kept
+	// above the 10s trace_timeout default so the fallback still lets a block's
+	// internal-data trace finish.
+	defaultRPCTimeoutSeconds = 15
+
 	// Alternative/private relays expire pending txs quickly, so local pending state
 	// must not inherit the legacy hour-scale public mempool timeout.
 	defaultMempoolTxTimeoutWithAlternativeProvider = 10 * time.Minute
@@ -170,11 +177,19 @@ type EthereumRPC struct {
 	mempoolInitialized bool
 	bestHeaderLock     sync.Mutex
 	bestHeader         bchain.EVMHeader
-	bestHeaderTime     time.Time
 	// newBlockNotifyCh coalesces bursts of newHeads events into a single wake-up.
 	// This keeps the subscription reader unblocked while we refresh the canonical tip.
-	newBlockNotifyCh          chan struct{}
-	newBlockNotifyOnce        sync.Once
+	newBlockNotifyCh chan struct{}
+	// subscribeReadersOnce guards the long-lived consumer goroutines (tip notifier,
+	// tip watchdog and the NewBlock/NewTx channel readers) so reconnectRPC ->
+	// subscribeEvents only re-creates the connection-bound subscriptions and never
+	// leaks a fresh set of readers on every reconnect.
+	subscribeReadersOnce sync.Once
+	// lastSubNotifyNs is the UnixNano of the last newHeads notification that
+	// advanced the cached tip (subscription path only, never watchdog polls).
+	// Keying liveness on tip advance, not mere arrival, lets the watchdog also
+	// catch a feed that keeps delivering but is stuck on one height.
+	lastSubNotifyNs           atomic.Int64
 	NewBlock                  bchain.EVMNewBlockSubscriber
 	newBlockSubscription      bchain.EVMClientSubscription
 	NewTx                     bchain.EVMNewTxSubscriber
@@ -268,6 +283,10 @@ func NewEthereumRPC(config json.RawMessage, pushHandler func(bchain.Notification
 	parser.AddrContractsCacheMaxBytes = c.AddressContractsCacheMaxBytes
 	parser.AddrContractsCacheBulkMaxBytes = c.AddressContractsCacheBulkMaxBytes
 	s.Parser = parser
+	if c.RPCTimeout <= 0 {
+		glog.Warningf("rpc_timeout=%d is invalid, using default %d seconds", c.RPCTimeout, defaultRPCTimeoutSeconds)
+		c.RPCTimeout = defaultRPCTimeoutSeconds
+	}
 	s.Timeout = time.Duration(c.RPCTimeout) * time.Second
 	s.PushHandler = pushHandler
 
@@ -360,7 +379,7 @@ func ethSyncRpcErrStatus(err error) string {
 	}
 	var rpcErr rpc.Error
 	if stdErrors.As(err, &rpcErr) {
-		return "rpc"
+		return "rpc_" + strconv.Itoa(rpcErr.ErrorCode())
 	}
 	return "error"
 }
@@ -442,6 +461,16 @@ func rpcURLHost(rawURL string) (string, error) {
 	return host, nil
 }
 
+// dialTimeout bounds the initial RPC/WS handshake. A websocket backend behind a
+// load balancer can accept the TCP socket but never complete the upgrade — the
+// exact silent stall tipWatchdog exists to heal. Dialing with context.Background()
+// then blocks forever, and because reconnectRPC runs on the lone tipWatchdog
+// goroutine that single healer parks indefinitely: the cached tip stays frozen,
+// resyncIndex keeps reporting a false syncNotNeeded, and sync silently stalls until
+// a restart. go-ethereum uses this context only for the first handshake, so the
+// established connection's lifetime is unaffected. A var so tests can shorten it.
+var dialTimeout = 30 * time.Second
+
 func dialRPC(rawURL string) (*rpc.Client, error) {
 	if rawURL == "" {
 		return nil, errors.New("empty rpc url")
@@ -450,7 +479,9 @@ func dialRPC(rawURL string) (*rpc.Client, error) {
 	if strings.HasPrefix(rawURL, "ws://") || strings.HasPrefix(rawURL, "wss://") {
 		opts = append(opts, rpc.WithWebsocketMessageSizeLimit(0))
 	}
-	return rpc.DialOptions(context.Background(), rawURL, opts...)
+	ctx, cancel := context.WithTimeout(context.Background(), dialTimeout)
+	defer cancel()
+	return rpc.DialOptions(ctx, rawURL, opts...)
 }
 
 // OpenRPC opens RPC connection to ETH backend.
@@ -709,22 +740,48 @@ func (b *EthereumRPC) InitializeMempool(addrDescForOutpoint bchain.AddrDescForOu
 }
 
 func (b *EthereumRPC) subscribeEvents() error {
-	b.newBlockNotifyOnce.Do(func() {
+	// The tip notifier, tip watchdog and the NewBlock/NewTx channel readers bind to
+	// the persistent channels, not to a specific connection, so start them exactly
+	// once. reconnectRPC -> subscribeEvents then only re-creates the EthSubscribe
+	// bound subscriptions below, instead of leaking a fresh reader set per reconnect.
+	b.subscribeReadersOnce.Do(func() {
 		go b.newBlockNotifier()
-	})
-	// new block notifications handling
-	go func() {
-		for {
-			_, ok := b.NewBlock.Read()
-			if !ok {
-				break
+		go b.tipWatchdog()
+		// new block notifications handling
+		go func() {
+			for {
+				h, ok := b.NewBlock.Read()
+				if !ok {
+					break
+				}
+				// Advance the tip from the delivered header, not a re-query over
+				// the load-balanced HTTP path (see onFeedHeader).
+				b.onFeedHeader(h)
 			}
-			b.signalNewBlock()
+		}()
+		// new mempool transaction notifications handling
+		if !b.ChainConfig.DisableMempoolSync {
+			go func() {
+				for {
+					t, ok := b.NewTx.Read()
+					if !ok {
+						break
+					}
+					hex := t.Hex()
+					if glog.V(2) {
+						glog.Info("rpc: new tx ", hex)
+					}
+					added := b.Mempool.AddTransactionToMempool(hex)
+					if added {
+						b.PushHandler(bchain.NotificationNewTx)
+					}
+				}
+			}()
 		}
-	}()
+	})
 
-	// new block subscription
-	if err := b.subscribe(func() (bchain.EVMClientSubscription, error) {
+	// new block subscription - re-created on every (re)connect
+	if err := b.subscribe("newHeads", func() (bchain.EVMClientSubscription, error) {
 		// invalidate the previous subscription - it is either the first one or there was an error
 		b.newBlockSubscription = nil
 		ctx, cancel := context.WithTimeout(context.Background(), b.Timeout)
@@ -740,27 +797,17 @@ func (b *EthereumRPC) subscribeEvents() error {
 		return err
 	}
 
-	// new mempool transaction notifications handling
-	go func() {
-		for {
-			t, ok := b.NewTx.Read()
-			if !ok {
-				break
-			}
-			hex := t.Hex()
-			if glog.V(2) {
-				glog.Info("rpc: new tx ", hex)
-			}
-			added := b.Mempool.AddTransactionToMempool(hex)
-			if added {
-				b.PushHandler(bchain.NotificationNewTx)
-			}
-		}
-	}()
+	// Arm lastSubNotifyNs at subscribe time, not only on the first tip advance.
+	// Liveness is otherwise stamped only when a header advances the tip, so a
+	// subscription that never delivers a usable header leaves it at 0 and keeps
+	// tipWatchdog's lastNs == 0 gate closed forever: the cached tip never refreshes
+	// and resyncIndex reports a silent syncNotNeeded. Seeding here lets a stalled
+	// feed age past the threshold so the watchdog polls and reconnects.
+	b.markSubscriptionAlive()
 
 	if !b.ChainConfig.DisableMempoolSync {
-		// new mempool transaction subscription
-		if err := b.subscribe(func() (bchain.EVMClientSubscription, error) {
+		// new mempool transaction subscription - re-created on every (re)connect
+		if err := b.subscribe("newPendingTransactions", func() (bchain.EVMClientSubscription, error) {
 			// invalidate the previous subscription - it is either the first one or there was an error
 			b.newTxSubscription = nil
 			ctx, cancel := context.WithTimeout(context.Background(), b.Timeout)
@@ -781,7 +828,7 @@ func (b *EthereumRPC) subscribeEvents() error {
 }
 
 // subscribe subscribes notification and tries to resubscribe in case of error
-func (b *EthereumRPC) subscribe(f func() (bchain.EVMClientSubscription, error)) error {
+func (b *EthereumRPC) subscribe(name string, f func() (bchain.EVMClientSubscription, error)) error {
 	s, err := f()
 	if err != nil {
 		return err
@@ -795,7 +842,8 @@ func (b *EthereumRPC) subscribe(f func() (bchain.EVMClientSubscription, error)) 
 			if e == nil {
 				return
 			}
-			glog.Error("Subscription error ", e)
+			glog.Error("Subscription error ", name, ": ", e)
+			b.ObserveSubscriptionEvent(name, "error")
 			timer := time.NewTimer(time.Second * 2)
 			// try in 2 second interval to resubscribe
 			for {
@@ -808,10 +856,12 @@ func (b *EthereumRPC) subscribe(f func() (bchain.EVMClientSubscription, error)) 
 					ns, err := f()
 					if err == nil {
 						// subscription successful, restart wait for next error
+						b.ObserveSubscriptionEvent(name, "resubscribed")
 						s = ns
 						continue Loop
 					}
-					glog.Error("Resubscribe error ", err)
+					glog.Error("Resubscribe error ", name, ": ", err)
+					b.ObserveSubscriptionEvent(name, "resubscribe_failed")
 					timer.Reset(time.Second * 2)
 				}
 			}
@@ -851,6 +901,13 @@ func (b *EthereumRPC) closeRPC() {
 	if b.RPC != nil {
 		b.RPC.Close()
 	}
+}
+
+// CloseRPC closes the underlying RPC client, aborting any in-flight calls.
+// Exported so embedders (e.g. Tron) can abort sync RPCs on shutdown without
+// running the EVM-specific subscription/monitor teardown done by Shutdown.
+func (b *EthereumRPC) CloseRPC() {
+	b.closeRPC()
 }
 
 func (b *EthereumRPC) reconnectRPC() error {
@@ -920,15 +977,11 @@ func (b *EthereumRPC) GetChainInfo() (*bchain.ChainInfo, error) {
 func (b *EthereumRPC) getBestHeader() (bchain.EVMHeader, error) {
 	b.bestHeaderLock.Lock()
 	defer b.bestHeaderLock.Unlock()
-	// if the best header was not updated for 15 minutes, there could be a subscription problem, reconnect RPC
-	// do it only in case of normal operation, not initial synchronization
-	if b.bestHeaderTime.Add(15*time.Minute).Before(time.Now()) && !b.bestHeaderTime.IsZero() && b.mempoolInitialized {
-		err := b.reconnectRPC()
-		if err != nil {
-			return nil, err
-		}
-		b.bestHeader = nil
-	}
+	// Subscription liveness (detecting a silently stalled newHeads feed and
+	// reconnecting) is owned by tipWatchdog, which runs off the bestHeaderLock so a
+	// reconnect can no longer block every concurrent tip reader. Here we only lazily
+	// fetch the very first header; afterwards the cache is advanced by the
+	// subscription-driven newBlockNotifier and by the watchdog's fallback poll.
 	if b.bestHeader == nil {
 		var err error
 		ctx, cancel := context.WithTimeout(context.Background(), b.Timeout)
@@ -938,42 +991,204 @@ func (b *EthereumRPC) getBestHeader() (bchain.EVMHeader, error) {
 			b.bestHeader = nil
 			return nil, err
 		}
-		b.bestHeaderTime = time.Now()
 	}
 	return b.bestHeader, nil
 }
 
-// UpdateBestHeader keeps track of the latest block header confirmed on chain
+// UpdateBestHeader keeps track of the latest block header confirmed on chain.
+// Non-monotonic: callers (Tron's ZeroMQ feed) own their ordering/reorg handling.
 func (b *EthereumRPC) UpdateBestHeader(h bchain.EVMHeader) {
 	if h == nil || h.Number() == nil {
 		return
 	}
 	glog.V(2).Info("rpc: new block header ", h.Number().Uint64())
-	b.setBestHeader(h)
+	b.setBestHeader(h, false)
 }
 
 func (b *EthereumRPC) signalNewBlock() {
-	// Non-blocking send: one pending signal is enough to refresh the tip.
+	// Non-blocking send: one pending signal is enough to wake the sync loop.
 	select {
 	case b.newBlockNotifyCh <- struct{}{}:
 	default:
 	}
 }
 
-func (b *EthereumRPC) newBlockNotifier() {
-	for range b.newBlockNotifyCh {
-		updated, err := b.refreshBestHeaderFromChain()
-		if err != nil {
-			glog.Error("refreshBestHeaderFromChain ", err)
-			continue
-		}
-		if updated {
-			b.PushHandler(bchain.NotificationNewBlock)
-		}
+// onFeedHeader advances the cached tip from the header the newHeads feed just
+// delivered (not a re-query over HTTP) and, only on a real advance, refreshes
+// liveness and wakes the sync loop. Behind a load balancer an HTTP re-query can
+// hit a lagging node and report a stale tip, freezing sync into a false "synced"
+// while newHeads still flows; the feed's header is authoritative. The update is
+// monotonic so a resubscribe onto a behind node cannot regress the tip.
+func (b *EthereumRPC) onFeedHeader(h bchain.EVMHeader) {
+	if b.setBestHeader(h, true) {
+		b.markSubscriptionAlive()
+		b.signalNewBlock()
 	}
 }
 
-func (b *EthereumRPC) refreshBestHeaderFromChain() (bool, error) {
+// newBlockNotifier wakes the sync loop after onFeedHeader advanced the tip. It is
+// decoupled from the reader via newBlockNotifyCh so a slow PushHandler cannot
+// stall the reader and back the newHeads channel up.
+func (b *EthereumRPC) newBlockNotifier() {
+	for range b.newBlockNotifyCh {
+		b.PushHandler(bchain.NotificationNewBlock)
+	}
+}
+
+const (
+	// tipWatchdogStaleBlocks scales the silent-stall window to the chain's cadence:
+	// if no newHeads notification arrives for this many nominal block intervals, the
+	// subscription is presumed dead and the watchdog heals it. Behind a load
+	// balancer a newHeads feed can stop delivering with no error on sub.Err(), so a
+	// purely error-driven resubscribe never fires.
+	tipWatchdogStaleBlocks = 30
+	// tipWatchdogMinStale / tipWatchdogMaxStale clamp the derived window so fast
+	// chains do not react to routine jitter and slow/misconfigured chains still
+	// recover in bounded time (the previous behaviour was a fixed 15 minutes, which
+	// on Polygon's 2s blocks meant ~450 missed blocks before any reaction).
+	tipWatchdogMinStale = 30 * time.Second
+	tipWatchdogMaxStale = 5 * time.Minute
+	// tipWatchdogMinInterval / tipWatchdogMaxInterval bound the sampling cadence.
+	tipWatchdogMinInterval = 5 * time.Second
+	tipWatchdogMaxInterval = 60 * time.Second
+)
+
+// ObserveSubscriptionEvent records a push-subscription lifecycle event. Exported
+// so embedders with their own notification feed (e.g. Tron's ZeroMQ) emit the
+// same metric.
+func (b *EthereumRPC) ObserveSubscriptionEvent(subscription, event string) {
+	if b.metrics == nil {
+		return
+	}
+	b.metrics.BackendSubscriptionEvents.With(common.Labels{"subscription": subscription, "event": event}).Inc()
+}
+
+// SetSubscriptionAgeSeconds records the age of the newest notification from the
+// tip feed. Exported for embedders that run their own watchdog.
+func (b *EthereumRPC) SetSubscriptionAgeSeconds(seconds float64) {
+	if b.metrics == nil {
+		return
+	}
+	b.metrics.BackendSubscriptionAgeSeconds.Set(seconds)
+}
+
+// markSubscriptionAlive records that the feed just advanced the cached tip — the
+// signal tipWatchdog uses to tell a live, progressing feed from one that went
+// silent or got stuck on a single height.
+func (b *EthereumRPC) markSubscriptionAlive() {
+	b.lastSubNotifyNs.Store(time.Now().UnixNano())
+}
+
+// TipStaleThreshold derives the silent-feed window from the chain's average block
+// time, clamped to a sane range. Exported so embedders (Tron, Avalanche) size
+// their watchdog window with the same policy.
+func (b *EthereumRPC) TipStaleThreshold() time.Duration {
+	avg := time.Duration(b.ChainConfig.AverageBlockTimeMs) * time.Millisecond
+	if avg <= 0 {
+		return tipWatchdogMaxStale
+	}
+	d := tipWatchdogStaleBlocks * avg
+	if d < tipWatchdogMinStale {
+		return tipWatchdogMinStale
+	}
+	if d > tipWatchdogMaxStale {
+		return tipWatchdogMaxStale
+	}
+	return d
+}
+
+// tipWatchdog detects a newHeads subscription that has silently stopped
+// delivering (common behind load balancers, which can drop the upstream without
+// signalling sub.Err()). On a stall it first polls the tip directly so sync keeps
+// progressing instead of trusting a frozen cached tip as "synced", then reconnects
+// to restore push delivery. It is started exactly once via subscribeReadersOnce.
+func (b *EthereumRPC) tipWatchdog() {
+	threshold := b.TipStaleThreshold()
+	interval := threshold / 3
+	if interval < tipWatchdogMinInterval {
+		interval = tipWatchdogMinInterval
+	}
+	if interval > tipWatchdogMaxInterval {
+		interval = tipWatchdogMaxInterval
+	}
+	glog.Infof("rpc: tip watchdog started, stall threshold %s, sampling every %s", threshold, interval)
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for range ticker.C {
+		if common.IsInShutdown() {
+			return
+		}
+		b.tipWatchdogTick(threshold)
+	}
+}
+
+// tipWatchdogTick is one watchdog evaluation, split out from the ticker loop so
+// it is unit-testable with an injected threshold and a fake client (no 30s wait).
+func (b *EthereumRPC) tipWatchdogTick(threshold time.Duration) {
+	// Heartbeat first: this Inc proves the lone watchdog goroutine is still ticking.
+	// If it ever parks (e.g. a hung reconnect), the counter stops and
+	// rate(blockbook_backend_subscription_events{event="watchdog_tick"}) drops to 0 —
+	// the only positive liveness signal for the sole feed-liveness healer, distinct
+	// from watchdog_stall/watchdog_reconnect which fire only on an already-seen stall.
+	b.ObserveSubscriptionEvent("newHeads", "watchdog_tick")
+	// lastSubNotifyNs is armed when subscribeEvents establishes the newHeads
+	// subscription and refreshed on every tip advance, so a non-zero value means
+	// "subscription is wired up". The zero guard only skips the brief window before
+	// the first subscribe (i.e. before InitializeMempool runs); it must not be the
+	// sole arming signal, or a feed that never advances would keep the watchdog off.
+	lastNs := b.lastSubNotifyNs.Load()
+	if lastNs == 0 {
+		return
+	}
+	age := time.Since(time.Unix(0, lastNs))
+	b.SetSubscriptionAgeSeconds(age.Seconds())
+	if age < threshold {
+		return
+	}
+	glog.Warningf("rpc: newHeads subscription silent for %s (threshold %s); polling tip and reconnecting", age.Truncate(time.Second), threshold)
+	b.ObserveSubscriptionEvent("newHeads", "watchdog_stall")
+	// Keep sync alive immediately: poll the canonical tip directly so a dead push
+	// channel can no longer freeze the cached tip into a false "synced". The poll is
+	// allowed to regress the tip here (unlike the hot path): after a sustained stall
+	// a lower backend height is a real rollback, not the transient load-balancer lag
+	// the monotonic guard filters (that lag resolves well within the stall window).
+	// Without this, a genuine rollback would leave the cached tip pinned above the
+	// backend and equal to the local DB tip, so resyncIndex keeps early-exiting as
+	// "synced" and never reaches its fork path (db/sync.go GetBlockHash check).
+	prevHeight := b.cachedTipHeight()
+	if updated, err := b.refreshBestHeaderFromChain(true); err != nil {
+		glog.Error("rpc: tip watchdog tip poll error ", err)
+	} else if updated {
+		if newHeight := b.cachedTipHeight(); newHeight < prevHeight {
+			glog.Warningf("rpc: tip watchdog observed backend rollback, cached tip %d -> %d; letting sync reconcile the fork", prevHeight, newHeight)
+			b.ObserveSubscriptionEvent("newHeads", "watchdog_tip_rollback")
+		} else {
+			b.ObserveSubscriptionEvent("newHeads", "watchdog_tip_advanced")
+		}
+		b.PushHandler(bchain.NotificationNewBlock)
+	}
+	// Restore push delivery by reconnecting the RPC and re-subscribing.
+	if err := b.reconnectRPC(); err != nil {
+		glog.Error("rpc: tip watchdog reconnect error ", err)
+		b.ObserveSubscriptionEvent("rpc", "watchdog_reconnect_failed")
+		return
+	}
+	b.ObserveSubscriptionEvent("rpc", "watchdog_reconnect")
+	// Give the fresh subscription a full window before judging it again so a
+	// flapping backend cannot trigger a reconnect storm.
+	b.markSubscriptionAlive()
+}
+
+// refreshBestHeaderFromChain polls the tip over HTTP. It is the watchdog's
+// fallback when the push feed is silent (no longer on the hot path).
+//
+// allowRegress controls the monotonic guard. Callers on the hot path pass false so
+// a lagging load-balancer node cannot regress the tip and trip a spurious fork. The
+// watchdog passes true: it only polls after a sustained stall (TipStaleThreshold),
+// by which point transient routing lag has resolved, so a still-lower backend tip
+// is a genuine rollback the cached tip must follow down — otherwise the guard pins
+// the tip above the backend and resyncIndex keeps reporting a false "synced".
+func (b *EthereumRPC) refreshBestHeaderFromChain(allowRegress bool) (bool, error) {
 	if b.Client == nil {
 		return false, errors.New("rpc client not initialized")
 	}
@@ -986,28 +1201,45 @@ func (b *EthereumRPC) refreshBestHeaderFromChain() (bool, error) {
 	if h == nil || h.Number() == nil {
 		return false, errors.New("best header is nil")
 	}
-	return b.setBestHeader(h), nil
+	return b.setBestHeader(h, !allowRegress), nil
 }
 
-func (b *EthereumRPC) setBestHeader(h bchain.EVMHeader) bool {
+// setBestHeader stores h as the cached tip and reports whether it changed (new
+// height, or same-height hash change i.e. a tip reorg). When monotonic, a lower
+// height is rejected so a lagging load-balancer node cannot regress the tip and
+// trip a spurious fork. A sustained real rollback (the backend genuinely below the
+// cached tip past TipStaleThreshold) is instead recovered by tipWatchdog, which
+// re-polls with the guard lifted so the tip follows the backend down and resyncIndex
+// reaches its fork path; see refreshBestHeaderFromChain.
+func (b *EthereumRPC) setBestHeader(h bchain.EVMHeader, monotonic bool) bool {
 	if h == nil || h.Number() == nil {
 		return false
 	}
 	b.bestHeaderLock.Lock()
 	defer b.bestHeaderLock.Unlock()
-	changed := false
-	if b.bestHeader == nil || b.bestHeader.Number() == nil {
-		changed = true
-	} else {
+	if b.bestHeader != nil && b.bestHeader.Number() != nil {
 		prevNum := b.bestHeader.Number().Uint64()
 		newNum := h.Number().Uint64()
-		if prevNum != newNum || b.bestHeader.Hash() != h.Hash() {
-			changed = true
+		if newNum == prevNum && b.bestHeader.Hash() == h.Hash() {
+			return false // identical tip: not progress
+		}
+		if monotonic && newNum < prevNum {
+			return false // lagging node: keep the higher tip
 		}
 	}
 	b.bestHeader = h
-	b.bestHeaderTime = time.Now()
-	return changed
+	return true
+}
+
+// cachedTipHeight returns the height of the cached tip, or 0 if it is unset. The
+// watchdog uses it to tell a forward advance from a rollback for logging/metrics.
+func (b *EthereumRPC) cachedTipHeight() uint64 {
+	b.bestHeaderLock.Lock()
+	defer b.bestHeaderLock.Unlock()
+	if b.bestHeader == nil || b.bestHeader.Number() == nil {
+		return 0
+	}
+	return b.bestHeader.Number().Uint64()
 }
 
 // GetBestBlockHash returns hash of the tip of the best-block-chain

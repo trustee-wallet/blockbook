@@ -177,6 +177,11 @@ func (w *SyncWorker) updateBackendInfo() {
 		ConsensusVersion: ci.ConsensusVersion,
 		Consensus:        ci.Consensus,
 	})
+	// Refresh tip-age on every resync outcome (nil/syncNotNeeded/error), not only on a
+	// successful connect: during a silent stall resyncIndex returns syncNotNeeded each
+	// run, so without this the gauge would only be refreshed by the ~15-minute app-info
+	// loop. A climbing blockbook_tip_age_seconds is the primary stall signal.
+	w.metrics.BackendTipAgeSeconds.Set(time.Since(w.is.GetBackendTipLastAdvance()).Seconds())
 }
 
 // ResyncIndex synchronizes index to the top of the blockchain
@@ -201,7 +206,6 @@ func (w *SyncWorker) ResyncIndex(onNewBlock bchain.OnNewBlockFunc, initialSync b
 			w.is.FinishedSync(bh)
 		}
 		w.metrics.BackendBestHeight.Set(float64(w.is.BackendInfo.Blocks))
-		w.metrics.BackendTipAgeSeconds.Set(time.Since(w.is.GetBackendTipLastAdvance()).Seconds())
 		w.metrics.BlockbookBestHeight.Set(float64(bh))
 		return err
 	case syncNotNeeded:
@@ -325,7 +329,15 @@ func (w *SyncWorker) handleFork(localBestHeight uint32, localBestHash string, on
 			break
 		}
 		remote, err := w.chain.GetBlockHash(height)
-		// for some coins (eth) remote can be at lower best height after rollback
+		// A tolerated ErrBlockNotFound leaves remote == "", which (local is non-empty
+		// here) counts this height as forked and disconnects it. That is intended: for
+		// EVM the backend can sit at a lower height after a rollback, and those blocks
+		// must be disconnected to realign with the chain. The tradeoff is that on a
+		// load-balanced backend a transient lagging node can answer NotFound for a block
+		// that is still canonical, over-disconnecting — bounded and self-healing, since
+		// the resyncIndex below re-connects them. Treating NotFound as a stop instead
+		// would be worse: genuinely orphaned blocks would stay connected after a real
+		// rollback, leaving the index wedged ahead of the backend.
 		if err != nil && !stdErrors.Is(err, bchain.ErrBlockNotFound) {
 			return err
 		}
@@ -348,7 +360,7 @@ func (w *SyncWorker) connectBlocks(onNewBlock bchain.OnNewBlockFunc, initialSync
 
 	go w.getBlockChain(bch, done)
 
-	var lastRes, empty blockResult
+	var lastRes blockResult
 
 	connect := func(res blockResult) error {
 		lastRes = res
@@ -386,8 +398,14 @@ ConnectLoop:
 		case <-w.chanOsSignal:
 			logInterrupted()
 			return ErrOperationInterrupted
-		case res := <-bch:
-			if res == empty {
+		case res, ok := <-bch:
+			if !ok {
+				select {
+				case <-w.chanOsSignal:
+					logInterrupted()
+					return ErrOperationInterrupted
+				default:
+				}
 				break ConnectLoop
 			}
 			err := connect(res)
