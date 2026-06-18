@@ -67,6 +67,8 @@ type PublicServer struct {
 	binding             string
 	certFiles           string
 	websocket           *WebsocketServer
+	serveMux            *http.ServeMux
+	restLimiter         *restAPIRateLimiter
 	https               *http.Server
 	db                  *db.RocksDB
 	txCache             *db.TxCache
@@ -98,9 +100,21 @@ func NewPublicServer(binding string, certFiles string, db *db.RocksDB, chain bch
 
 	addr, path := splitBinding(binding)
 	serveMux := http.NewServeMux()
+	restLimiter, err := newRestAPIRateLimiter(is.GetNetwork(), metrics)
+	if err != nil {
+		return nil, err
+	}
+	handler := http.Handler(serveMux)
+	if restLimiter != nil {
+		// the API root must be derived exactly like the route registrations in
+		// ConnectFullPublicInterface (raw concatenation, not publicPath), so the
+		// limiter covers the same paths the mux actually serves for every
+		// binding shape
+		handler = restLimiter.wrapAPI(handler, path+"api")
+	}
 	https := &http.Server{
 		Addr:    addr,
-		Handler: serveMux,
+		Handler: handler,
 	}
 
 	s := &PublicServer{
@@ -110,6 +124,8 @@ func NewPublicServer(binding string, certFiles string, db *db.RocksDB, chain bch
 		},
 		binding:             binding,
 		certFiles:           certFiles,
+		serveMux:            serveMux,
+		restLimiter:         restLimiter,
 		https:               https,
 		api:                 api,
 		websocket:           websocket,
@@ -158,7 +174,7 @@ func (s *PublicServer) Run() error {
 
 // ConnectFullPublicInterface enables complete public functionality
 func (s *PublicServer) ConnectFullPublicInterface() {
-	serveMux := s.https.Handler.(*http.ServeMux)
+	serveMux := s.serveMux
 	_, path := splitBinding(s.binding)
 	// support for test pages
 	serveMux.Handle(publicPath(path, "test-websocket.html"), prefixedStaticFileServer(publicPath(path, "")))
@@ -1071,13 +1087,15 @@ func (s *PublicServer) getAddressQueryParams(r *http.Request, accountDetails api
 	// Validate gap: non-negative, reasonable max (gap limit typically small, maxGapValue)
 	gap := validateIntParam(r.URL.Query().Get("gap"), 0, 0, maxGapValue)
 	contract := r.URL.Query().Get("contract")
+	withConfirmedNonce, _ := strconv.ParseBool(r.URL.Query().Get("confirmedNonce"))
 	return page, pageSize, accountDetails, &api.AddressFilter{
-		Vout:           voutFilter,
-		TokensToReturn: tokensToReturn,
-		FromHeight:     uint32(from),
-		ToHeight:       uint32(to),
-		Contract:       contract,
-		Protocols:      parseProtocolsQuery(r.URL.Query()["protocols"]),
+		Vout:               voutFilter,
+		TokensToReturn:     tokensToReturn,
+		FromHeight:         uint32(from),
+		ToHeight:           uint32(to),
+		Contract:           contract,
+		Protocols:          parseProtocolsQuery(r.URL.Query()["protocols"]),
+		WithConfirmedNonce: withConfirmedNonce,
 	}, filterParam, gap
 }
 
@@ -1659,11 +1677,16 @@ func (s *PublicServer) apiBalanceHistory(r *http.Request, apiVersion int) (inter
 		if fiat != "" {
 			fiatArray = []string{fiat}
 		}
-		history, err = s.api.GetXpubBalanceHistory(r.URL.Path[i+1:], fromTimestamp, toTimestamp, fiatArray, gap, uint32(groupBy))
+		history, err = s.api.GetXpubBalanceHistory(r.URL.Path[i+1:], fromTimestamp, toTimestamp, fiatArray, gap, uint32(groupBy), s.is.BalanceHistoryMaxTxsREST, api.BalanceHistoryTransportREST)
 		if err == nil {
 			s.metrics.ExplorerViews.With(common.Labels{"action": "api-xpub-balancehistory"}).Inc()
+		} else if apiErr, ok := err.(*api.APIError); ok && apiErr.Public {
+			// A public error from the xpub path (e.g. the range spans too many
+			// transactions) is definitive for a valid xpub; do not retry as an
+			// address, which would mask it with an address-parse error.
+			return history, err
 		} else {
-			history, err = s.api.GetBalanceHistory(r.URL.Path[i+1:], fromTimestamp, toTimestamp, fiatArray, uint32(groupBy))
+			history, err = s.api.GetBalanceHistory(r.URL.Path[i+1:], fromTimestamp, toTimestamp, fiatArray, uint32(groupBy), s.is.BalanceHistoryMaxTxsREST, api.BalanceHistoryTransportREST)
 			s.metrics.ExplorerViews.With(common.Labels{"action": "api-address-balancehistory"}).Inc()
 		}
 	}

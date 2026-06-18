@@ -63,6 +63,17 @@ metrics:
     help: Output point count for address or xpub balance-history responses
     labels: [path]
     buckets: [1, 2, 5, 10, 20, 40, 80, 160, 320, 640, 1280]
+  balance_history_txs:
+    name: blockbook_balance_history_txs
+    type: histogram_vec
+    help: Transactions aggregated per balance-history request (the per-request DB work the cap bounds), split by transport and endpoint path; clamped at the configured cap+1 when the cap rejects the request
+    labels: [transport, path]
+    buckets: [1, 10, 100, 1000, 5000, 25000, 50000, 100000, 250000, 500000, 1000000, 2000000]
+  balance_history_cap_exceeded_total:
+    name: blockbook_balance_history_cap_exceeded_total
+    type: counter_vec
+    help: Balance-history requests rejected because the requested range spanned more transactions than the configured cap, split by transport and endpoint path
+    labels: [transport, path]
   websocket_eth_receipt:
     name: blockbook_websocket_eth_receipt
     type: counter_vec
@@ -72,6 +83,10 @@ metrics:
     name: blockbook_websocket_new_block_txs_subscriptions
     type: gauge
     help: Address subscriptions that opted into confirmed-block newBlockTxs notifications
+  websocket_new_block_notifications:
+    name: blockbook_websocket_new_block_notifications
+    type: counter
+    help: New block notifications delivered to subscribeNewBlock subscribers, incremented by the number of subscribed clients on every indexed block
   websocket_connection_requests:
     name: blockbook_websocket_connection_requests
     type: histogram
@@ -90,6 +105,31 @@ metrics:
     name: blockbook_websocket_max_connections_per_ip
     type: gauge
     help: Largest number of concurrent websocket connections held by any single client IP, the size of the biggest connection cluster
+  websocket_blocked_ips:
+    name: blockbook_websocket_blocked_ips
+    type: gauge
+    help: Distinct client keys (IPv4 address or IPv6 /64 prefix) currently blocked from opening websocket connections after tripping the per-connection message rate limit
+  websocket_blocked_connections:
+    name: blockbook_websocket_blocked_connections
+    type: counter
+    help: Websocket connection attempts rejected before upgrade because the client key was on the temporary IP blocklist
+  rest_api_rate_limit_rejections:
+    name: blockbook_rest_api_rate_limit_rejections
+    type: counter_vec
+    help: REST API requests rejected by the per-IP limiter before handler work
+    labels: [reason]
+  rest_api_active_ips:
+    name: blockbook_rest_api_active_ips
+    type: gauge
+    help: Distinct client keys with at least one in-flight REST API request
+  rest_api_max_active_requests_per_ip:
+    name: blockbook_rest_api_max_active_requests_per_ip
+    type: gauge
+    help: Largest number of in-flight REST API requests held by one client key
+  rest_api_blocked_ips:
+    name: blockbook_rest_api_blocked_ips
+    type: gauge
+    help: Distinct client keys currently blocked from REST API requests
   index_resync_duration:
     name: blockbook_index_resync_duration
     type: histogram
@@ -184,6 +224,11 @@ metrics:
     name: blockbook_mempool_size
     type: gauge
     help: Transactions retained from the last successful backend reload
+  eth_alternative_mempool_reconciliation_events_total:
+    name: blockbook_eth_alternative_mempool_reconciliation_events_total
+    type: counter_vec
+    help: Alternative send-transaction mempool cache reconciliation decisions, labeled by action such as skipped_fresh, kept, provider_error, provider_missing, mined, nonce_superseded or timeout
+    labels: [action]
   estimated_fee:
     name: blockbook_estimated_fee
     type: gauge_vec
@@ -298,6 +343,21 @@ metrics:
     help: Time spent in fiat-rate downloader stages such as current, hourly, historical and token ticker updates
     labels: [stage, status]
     buckets: [0.01, 0.05, 0.1, 0.25, 0.5, 1, 2, 5, 10, 20, 30, 60, 120, 300]
+  fiat_rates_fetched_units_total:
+    name: blockbook_fiat_rates_fetched_units_total
+    type: counter_vec
+    help: Daily fiat-rate time-units fetched and persisted, split by fetch phase (tip, backfill, bootstrap, reconcile)
+    labels: [phase]
+  fiat_rates_fetched_tokens_total:
+    name: blockbook_fiat_rates_fetched_tokens_total
+    type: counter_vec
+    help: Token fiat-rate series fetched and persisted, split by fetch phase (backfill, bootstrap, reconcile)
+    labels: [phase]
+  fiat_rates_unable_total:
+    name: blockbook_fiat_rates_unable_total
+    type: counter_vec
+    help: Fiat-rate series that could not be fetched, split by phase and reason (gap_too_large, fetch_failed, provider_banned, no_base_ticker, budget_exhausted)
+    labels: [phase, reason]
   alternative_fee_provider_requests:
     name: blockbook_alternative_fee_provider_requests
     type: counter_vec

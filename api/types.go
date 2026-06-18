@@ -401,6 +401,9 @@ type AddressFilter struct {
 	Protocols      []string       `ts_doc:"Optional protocol enrichments to include. Supported values currently include 'erc4626'."`
 	// OnlyConfirmed set to true will ignore mempool transactions; mempool is also ignored if FromHeight/ToHeight filter is specified
 	OnlyConfirmed bool `ts_doc:"If true, ignores mempool (unconfirmed) transactions."`
+	// WithConfirmedNonce set to true makes the Ethereum-like address response include the confirmed nonce,
+	// which requires an extra eth_getTransactionCount("latest") backend call; off by default to avoid that cost.
+	WithConfirmedNonce bool `ts_doc:"If true, additionally fetch and return the confirmed nonce for Ethereum-like addresses (extra backend call)."`
 }
 
 // StakingPool holds data about address participation in a staking pool contract
@@ -433,7 +436,8 @@ type Address struct {
 	InternalTxs           int                 `json:"internalTxs,omitempty" ts_doc:"Number of internal transactions (e.g., Ethereum calls)."`
 	Transactions          []*Tx               `json:"transactions,omitempty" ts_doc:"List of transaction details (if requested)."`
 	Txids                 []string            `json:"txids,omitempty" ts_doc:"List of transaction IDs (if detailed data is not requested)."`
-	Nonce                 string              `json:"nonce,omitempty" ts_doc:"Current transaction nonce for Ethereum-like addresses."`
+	Nonce                 string              `json:"nonce,omitempty" ts_doc:"Current (pending) transaction nonce for Ethereum-like addresses, including mempool transactions. This is the next nonce the account will use."`
+	ConfirmedNonce        string              `json:"confirmedNonce,omitempty" ts_doc:"Confirmed transaction nonce for Ethereum-like addresses, reflecting only mined transactions (eth_getTransactionCount at the latest block). Equals nonce when the account has no pending transactions."`
 	UsedTokens            int                 `json:"usedTokens,omitempty" ts_doc:"Number of tokens with any historical usage at this address."`
 	Tokens                Tokens              `json:"tokens,omitempty" ts_doc:"List of tokens associated with this address."`
 	SecondaryValue        float64             `json:"secondaryValue,omitempty" ts_doc:"Total value of the address in secondary currency (e.g. fiat)."`

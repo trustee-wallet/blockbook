@@ -768,8 +768,12 @@ func (w *Worker) GetXpubUtxo(xpub string, onlyConfirmed bool, gap int) (Utxos, e
 	return r, nil
 }
 
-// GetXpubBalanceHistory returns history of balance for given xpub
-func (w *Worker) GetXpubBalanceHistory(xpub string, fromTimestamp, toTimestamp int64, currencies []string, gap int, groupBy uint32) (BalanceHistories, error) {
+// GetXpubBalanceHistory returns history of balance for given xpub. maxTxs bounds
+// how many transactions in the requested range (summed across the derived
+// addresses) may be aggregated (0 = unlimited); the caller supplies the
+// transport-specific cap (WS vs REST). transport labels the emitted metrics with
+// the serving surface.
+func (w *Worker) GetXpubBalanceHistory(xpub string, fromTimestamp, toTimestamp int64, currencies []string, gap int, groupBy uint32, maxTxs int, transport string) (BalanceHistories, error) {
 	bhs := make(BalanceHistories, 0)
 	start := time.Now()
 	fromUnix, fromHeight, toUnix, toHeight := w.balanceHistoryHeightsFromTo(fromTimestamp, toTimestamp)
@@ -780,11 +784,13 @@ func (w *Worker) GetXpubBalanceHistory(xpub string, fromTimestamp, toTimestamp i
 	if err != nil {
 		return nil, err
 	}
-	data, _, inCache, err := w.getXpubData(xd, 0, 1, AccountDetailsTxidHistory, &AddressFilter{
+	// Load only the derived addresses and their balances (cheap, shared cache), not
+	// AccountDetailsTxidHistory -- that loads every address's full txid history
+	// (unbounded, ignoring from/to) before any cap could reject it. Instead query each
+	// address's txids within the height range below, bounded to maxTxs+1.
+	data, _, inCache, err := w.getXpubData(xd, 0, 1, AccountDetailsBasic, &AddressFilter{
 		Vout:          AddressFilterVoutOff,
 		OnlyConfirmed: true,
-		FromHeight:    fromHeight,
-		ToHeight:      toHeight,
 	}, gap)
 	if err != nil {
 		return nil, err
@@ -795,18 +801,63 @@ func (w *Worker) GetXpubBalanceHistory(xpub string, fromTimestamp, toTimestamp i
 			selfAddrDesc[string(da[i].addrDesc)] = struct{}{}
 		}
 	}
+	// Bound the work: each transaction costs a DB read below, so load at most one
+	// more than the cap across all derived addresses (overflow detectable), then
+	// reject rather than silently truncate.
+	remaining := maxInt
+	if maxTxs > 0 {
+		remaining = maxTxs + 1
+	}
+	type addrTxids struct {
+		addrDesc bchain.AddressDescriptor
+		txids    []string
+	}
+	var loaded []addrTxids
+	total := 0
+	rangeFilter := &AddressFilter{Vout: AddressFilterVoutOff, FromHeight: fromHeight, ToHeight: toHeight}
 	for _, da := range data.addresses {
 		for i := range da {
 			ad := &da[i]
-			txids := ad.txids
-			for txi := len(txids) - 1; txi >= 0; txi-- {
-				bh, err := w.balanceHistoryForTxid(ad.addrDesc, txids[txi].txid, fromUnix, toUnix, selfAddrDesc)
-				if err != nil {
-					return nil, err
+			if ad.balance == nil {
+				continue
+			}
+			txids, err := w.getAddressTxids(ad.addrDesc, false, rangeFilter, remaining)
+			if err != nil {
+				return nil, err
+			}
+			if len(txids) == 0 {
+				continue
+			}
+			loaded = append(loaded, addrTxids{addrDesc: ad.addrDesc, txids: txids})
+			total += len(txids)
+			if maxTxs > 0 {
+				if remaining -= len(txids); remaining <= 0 {
+					break
 				}
-				if bh != nil {
-					bhs = append(bhs, *bh)
-				}
+			}
+		}
+		if maxTxs > 0 && remaining <= 0 {
+			break
+		}
+	}
+	if w.metrics != nil {
+		w.metrics.BalanceHistoryTxs.With(common.Labels{"transport": transport, "path": "xpub"}).Observe(float64(total))
+	}
+	if maxTxs > 0 && total > maxTxs {
+		if w.metrics != nil {
+			w.metrics.BalanceHistoryCapExceeded.With(common.Labels{"transport": transport, "path": "xpub"}).Inc()
+		}
+		return nil, NewAPIError(fmt.Sprintf("balance history for xpub spans more than %d transactions in the requested range; narrow the from/to range", maxTxs), true)
+	}
+	for _, at := range loaded {
+		txids := at.txids
+		for txi := len(txids) - 1; txi >= 0; txi-- {
+			bh, err := w.balanceHistoryForTxid(at.addrDesc, txids[txi], fromUnix, toUnix, selfAddrDesc)
+			if err != nil {
+				return nil, err
+			}
+			if bh != nil {
+				bhs = append(bhs, *bh)
 			}
 		}
 	}

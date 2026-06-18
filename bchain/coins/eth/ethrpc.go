@@ -293,6 +293,10 @@ func NewEthereumRPC(config json.RawMessage, pushHandler func(bchain.Notification
 	return s, nil
 }
 
+// SetMetrics sets the metrics registry. The alternative send-tx provider receives the same metrics
+// at construction (NewAlternativeSendTxProvider, called from InitAlternativeProviders, which runs
+// after SetMetrics), so it is intentionally not assigned here - and must not be, since its reconcile
+// goroutine reads provider.metrics without synchronization, so that field stays write-once.
 func (b *EthereumRPC) SetMetrics(metrics *common.Metrics) {
 	b.metrics = metrics
 }
@@ -684,7 +688,7 @@ func (b *EthereumRPC) InitAlternativeProviders() error {
 	if err != nil {
 		return err
 	}
-	b.alternativeSendTxProvider = NewAlternativeSendTxProvider(network, b.ChainConfig.RPCTimeout, alternativeMempoolTxTimeout)
+	b.alternativeSendTxProvider = NewAlternativeSendTxProvider(network, b.ChainConfig.RPCTimeout, alternativeMempoolTxTimeout, b.metrics)
 	return nil
 }
 
@@ -928,6 +932,7 @@ func (b *EthereumRPC) Shutdown(ctx context.Context) error {
 	b.NewBlock.Close()
 	b.NewTx.Close()
 	b.consensusMonitor.shutdown()
+	b.alternativeSendTxProvider.shutdown()
 	glog.Info("rpc: shutdown")
 	return nil
 }
@@ -1987,43 +1992,115 @@ func (b *EthereumRPC) EthereumTypeGetBalance(addrDesc bchain.AddressDescriptor) 
 	return b.Client.BalanceAt(ctx, addrDesc, nil)
 }
 
-// EthereumTypeGetNonce returns current balance of an address
-func (b *EthereumRPC) EthereumTypeGetNonce(addrDesc bchain.AddressDescriptor) (uint64, error) {
-	var result string
-	var err error
-	var usedAlternative bool
-
+// EthereumTypeGetNonces returns the pending account nonce and, only when withConfirmed
+// is set, the confirmed (latest) nonce.
+//
+// The pending nonce (eth_getTransactionCount at the "pending" tag) counts transactions
+// still queued in the mempool and is the next nonce the account will use; it is always
+// fetched and is required, so a failure to obtain it returns an error. The confirmed nonce
+// (the "latest" tag) reflects only mined transactions and requires a second backend call,
+// so it is gated behind withConfirmed to avoid that cost on every address request. When
+// requested, both tags are fetched in a single JSON-RPC batch round-trip so the confirmed
+// value adds no extra latency. The confirmed nonce is best-effort: if only the latest
+// lookup fails, the pending nonce is still returned with confirmedOK=false so the caller
+// can omit it rather than failing the whole request. When confirmedOK is false the returned
+// confirmed value is 0 and must be ignored.
+func (b *EthereumRPC) EthereumTypeGetNonces(addrDesc bchain.AddressDescriptor, withConfirmed bool) (uint64, uint64, bool, error) {
 	ethAddress := ethcommon.BytesToAddress(addrDesc)
 
 	if b.alternativeSendTxProvider != nil {
-		result, err = b.alternativeSendTxProvider.callHttpStringResult(
-			b.alternativeSendTxProvider.urls[0],
-			"eth_getTransactionCount",
-			ethAddress,
-			"pending",
-		)
-		if err == nil && result != "" {
-			usedAlternative = true
-		} else {
-			glog.Errorf("Alternative provider failed for eth_getTransactionCount: %v, falling back to primary RPC", err)
+		pending, confirmed, confirmedOK, err := b.alternativeSendTxProvider.getNonces(ethAddress, withConfirmed)
+		if err == nil {
+			return pending, confirmed, confirmedOK, nil
 		}
+		glog.Errorf("Alternative provider failed for eth_getTransactionCount: %v, falling back to primary RPC", err)
 	}
 
-	if !usedAlternative {
-		result, err = b.callRpcStringResult("eth_getTransactionCount", ethAddress, "pending")
-		if err != nil {
-			glog.Errorf("Primary RPC failed for eth_getTransactionCount: %v", err)
-			return 0, err
-		}
-	}
-
-	nonce, err := hexutil.DecodeUint64(result)
+	pending, confirmed, confirmedOK, err := b.getNoncesRPC(ethAddress, withConfirmed)
 	if err != nil {
-		glog.Errorf("Failed to parse nonce result '%s': %v", result, err)
+		glog.Errorf("Primary RPC failed for eth_getTransactionCount: %v", err)
+		return 0, 0, false, err
+	}
+	return pending, confirmed, confirmedOK, nil
+}
+
+// getNoncesRPC fetches the pending account nonce from the primary RPC, plus the confirmed
+// (latest) nonce when withConfirmed is set. When both are requested and the client supports
+// JSON-RPC batching, they are fetched in a single round-trip; otherwise the calls are made
+// sequentially (e.g. a minimal RPC mock in tests). The confirmed nonce is best-effort (see
+// EthereumTypeGetNonces): a failed latest lookup yields confirmedOK=false, not an error.
+func (b *EthereumRPC) getNoncesRPC(addr ethcommon.Address, withConfirmed bool) (uint64, uint64, bool, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), b.Timeout)
+	defer cancel()
+
+	if !withConfirmed {
+		pending, err := b.getTransactionCount(ctx, addr, "pending")
+		if err != nil {
+			return 0, 0, false, err
+		}
+		return pending, 0, false, nil
+	}
+
+	if bc, ok := b.RPC.(interface {
+		BatchCallContext(context.Context, []rpc.BatchElem) error
+	}); ok {
+		var pendingHex, confirmedHex string
+		batch := []rpc.BatchElem{
+			{Method: "eth_getTransactionCount", Args: []interface{}{addr, "pending"}, Result: &pendingHex},
+			{Method: "eth_getTransactionCount", Args: []interface{}{addr, "latest"}, Result: &confirmedHex},
+		}
+		if err := bc.BatchCallContext(ctx, batch); err != nil {
+			return 0, 0, false, err
+		}
+		if batch[0].Error != nil {
+			return 0, 0, false, batch[0].Error
+		}
+		pending, err := hexutil.DecodeUint64(pendingHex)
+		if err != nil {
+			return 0, 0, false, errors.Annotatef(err, "pending nonce %q", pendingHex)
+		}
+		confirmed, confirmedOK := decodeConfirmedNonce(addr, confirmedHex, batch[1].Error)
+		return pending, confirmed, confirmedOK, nil
+	}
+
+	pending, err := b.getTransactionCount(ctx, addr, "pending")
+	if err != nil {
+		return 0, 0, false, err
+	}
+	var confirmedHex string
+	cerr := b.RPC.CallContext(ctx, &confirmedHex, "eth_getTransactionCount", addr, "latest")
+	confirmed, confirmedOK := decodeConfirmedNonce(addr, confirmedHex, cerr)
+	return pending, confirmed, confirmedOK, nil
+}
+
+// getTransactionCount fetches and decodes a single eth_getTransactionCount value at the given
+// block tag.
+func (b *EthereumRPC) getTransactionCount(ctx context.Context, addr ethcommon.Address, tag string) (uint64, error) {
+	var hex string
+	if err := b.RPC.CallContext(ctx, &hex, "eth_getTransactionCount", addr, tag); err != nil {
 		return 0, err
 	}
+	n, err := hexutil.DecodeUint64(hex)
+	if err != nil {
+		return 0, errors.Annotatef(err, "%s nonce %q", tag, hex)
+	}
+	return n, nil
+}
 
-	return nonce, nil
+// decodeConfirmedNonce decodes the best-effort confirmed (latest) nonce. On any error (lookup
+// or decode) it logs and reports confirmedOK=false so the caller omits the confirmed nonce
+// instead of failing the request.
+func decodeConfirmedNonce(addr ethcommon.Address, confirmedHex string, lookupErr error) (uint64, bool) {
+	if lookupErr != nil {
+		glog.Warningf("confirmed nonce (latest) lookup failed for %s: %v; omitting confirmedNonce", addr.Hex(), lookupErr)
+		return 0, false
+	}
+	confirmed, err := hexutil.DecodeUint64(confirmedHex)
+	if err != nil {
+		glog.Warningf("confirmed nonce (latest) decode failed for %s (%q): %v; omitting confirmedNonce", addr.Hex(), confirmedHex, err)
+		return 0, false
+	}
+	return confirmed, true
 }
 
 // GetChainParser returns ethereum BlockChainParser

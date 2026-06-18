@@ -1192,6 +1192,7 @@ type ethereumTypeAddressData struct {
 	tokens               Tokens
 	contractInfo         *bchain.ContractInfo
 	nonce                string
+	confirmedNonce       string
 	nonContractTxs       int
 	internalTxs          int
 	totalResults         int
@@ -1211,7 +1212,8 @@ func (w *Worker) getSecondaryTicker(secondaryCoin string) *common.CurrencyRatesT
 
 func (w *Worker) getEthereumTypeAddressBalances(addrDesc bchain.AddressDescriptor, details AccountDetails, filter *AddressFilter, secondaryCoin string) (*db.AddrBalance, *ethereumTypeAddressData, error) {
 	var ba *db.AddrBalance
-	var n uint64
+	var nPending, nConfirmed uint64
+	var confirmedNonceOK bool
 	// unknown number of results for paging initially
 	d := ethereumTypeAddressData{totalResults: -1}
 	// Load cached contract list and totals from the index; this drives token lookups.
@@ -1240,9 +1242,9 @@ func (w *Worker) getEthereumTypeAddressBalances(addrDesc bchain.AddressDescripto
 		if b != nil {
 			ba.BalanceSat = *b
 		}
-		n, err = w.chain.EthereumTypeGetNonce(addrDesc)
+		nPending, nConfirmed, confirmedNonceOK, err = w.chain.EthereumTypeGetNonces(addrDesc, filter.WithConfirmedNonce)
 		if err != nil {
-			return nil, nil, errors.Annotatef(err, "EthereumTypeGetNonce %v", addrDesc)
+			return nil, nil, errors.Annotatef(err, "EthereumTypeGetNonces %v", addrDesc)
 		}
 		ticker := w.getSecondaryTicker(secondaryCoin)
 		var erc20Balances map[string]*big.Int
@@ -1346,9 +1348,20 @@ func (w *Worker) getEthereumTypeAddressBalances(addrDesc bchain.AddressDescripto
 				BalanceSat: *b,
 			}
 		}
+		// A fresh address has no indexed data only because it has never sent a transaction (every
+		// sender is recorded in the index), so both its pending and confirmed nonce are 0 - the same
+		// value the indexed path would fetch, without a backend call. When the caller opted in,
+		// surface the confirmed nonce as "0" for symmetry with the indexed path; omitting it would be
+		// indistinguishable from the feature not being deployed. nPending/nConfirmed are already 0.
+		confirmedNonceOK = filter.WithConfirmedNonce
 	}
 	// returns 0 for unknown address
-	d.nonce = strconv.Itoa(int(n))
+	d.nonce = strconv.Itoa(int(nPending))
+	// confirmed nonce is gated and best-effort: surfaced only when the caller opted in
+	// and the backend lookup succeeded; otherwise it is left empty and omitted
+	if confirmedNonceOK {
+		d.confirmedNonce = strconv.Itoa(int(nConfirmed))
+	}
 	// special handling if filtering for a contract, return the contract details even though the address had no transactions with it
 	if len(d.tokens) == 0 && len(filterDesc) > 0 && details >= AccountDetailsTokens {
 		// Query the backend directly to return contract metadata/balance for filtered views.
@@ -1710,6 +1723,7 @@ func (w *Worker) GetAddress(address string, page int, txsOnPage int, option Acco
 		TotalSecondaryValue:   totalSecondaryValue,
 		ContractInfo:          contractInfoResultFromBchain(ed.contractInfo, contractInfoBestHeight),
 		Nonce:                 ed.nonce,
+		ConfirmedNonce:        ed.confirmedNonce,
 		AddressAliases:        w.getAddressAliases(addresses),
 		StakingPools:          ed.stakingPools,
 		ChainExtraData:        accountChainExtraData,
@@ -1984,8 +1998,30 @@ func (w *Worker) balanceHistoryForTxid(addrDesc bchain.AddressDescriptor, txid s
 	return &bh, nil
 }
 
-// GetBalanceHistory returns history of balance for given address
-func (w *Worker) GetBalanceHistory(address string, fromTimestamp, toTimestamp int64, currencies []string, groupBy uint32) (BalanceHistories, error) {
+// DefaultBalanceHistoryMaxTxsREST / DefaultBalanceHistoryMaxTxsWS cap how many
+// transactions a single balance-history request may aggregate, split by transport.
+// The cap bounds per-request DB work (one read per aggregated transaction). REST is
+// tighter (open, unauthenticated surface); WS is generous because Trezor Suite
+// requests full account history over WS for its balance graph. Override or disable
+// (0) via <NET>_{WS,REST}_BALANCE_HISTORY_MAX_TXS (<NET>_BALANCE_HISTORY_MAX_TXS
+// sets both).
+const (
+	DefaultBalanceHistoryMaxTxsREST = 250000
+	DefaultBalanceHistoryMaxTxsWS   = 1000000
+)
+
+// Transport labels for the balance-history metrics, identifying which surface
+// served a request. Passed by the caller (the worker is transport-agnostic).
+const (
+	BalanceHistoryTransportWS   = "ws"
+	BalanceHistoryTransportREST = "rest"
+)
+
+// GetBalanceHistory returns history of balance for given address. maxTxs bounds
+// how many transactions in the requested range may be aggregated (0 = unlimited);
+// the caller supplies the transport-specific cap (WS vs REST). transport labels
+// the emitted metrics with the serving surface.
+func (w *Worker) GetBalanceHistory(address string, fromTimestamp, toTimestamp int64, currencies []string, groupBy uint32, maxTxs int, transport string) (BalanceHistories, error) {
 	currencies = removeEmpty(currencies)
 	bhs := make(BalanceHistories, 0)
 	start := time.Now()
@@ -2008,9 +2044,26 @@ func (w *Worker) GetBalanceHistory(address string, fromTimestamp, toTimestamp in
 	if fromHeight >= toHeight {
 		return bhs, nil
 	}
-	txs, err := w.getAddressTxids(addrDesc, false, &AddressFilter{Vout: AddressFilterVoutOff, FromHeight: fromHeight, ToHeight: toHeight}, maxInt)
+	// Bound the work: each transaction in the range costs a DB read below, so an
+	// unbounded scan over a heavy address is a cheap-to-send DoS. Fetch at most
+	// one more than the cap so the overflow is detectable, then reject rather
+	// than silently truncate (which would return a wrong balance history).
+	maxResults := maxInt
+	if maxTxs > 0 {
+		maxResults = maxTxs + 1
+	}
+	txs, err := w.getAddressTxids(addrDesc, false, &AddressFilter{Vout: AddressFilterVoutOff, FromHeight: fromHeight, ToHeight: toHeight}, maxResults)
 	if err != nil {
 		return nil, err
+	}
+	if w.metrics != nil {
+		w.metrics.BalanceHistoryTxs.With(common.Labels{"transport": transport, "path": "address"}).Observe(float64(len(txs)))
+	}
+	if maxTxs > 0 && len(txs) > maxTxs {
+		if w.metrics != nil {
+			w.metrics.BalanceHistoryCapExceeded.With(common.Labels{"transport": transport, "path": "address"}).Inc()
+		}
+		return nil, NewAPIError(fmt.Sprintf("balance history spans more than %d transactions in the requested range; narrow the from/to range", maxTxs), true)
 	}
 	selfAddrDesc := map[string]struct{}{string(addrDesc): {}}
 	for txi := len(txs) - 1; txi >= 0; txi-- {

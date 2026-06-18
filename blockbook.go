@@ -576,6 +576,44 @@ func newInternalState(config *common.Config, d *db.RocksDB, enableSubNewTx bool)
 		glog.Info("WsGetAccountInfoLimit enabled with limit ", is.WsGetAccountInfoLimit)
 		is.WsLimitExceedingIPs = make(map[string]int)
 	}
+
+	// Balance-history transaction cap, split by transport. The shared
+	// <NET>_BALANCE_HISTORY_MAX_TXS is a backward-compatible fallback that sets
+	// the default for both surfaces; the transport-specific
+	// <NET>_WS_BALANCE_HISTORY_MAX_TXS / <NET>_REST_BALANCE_HISTORY_MAX_TXS then
+	// override their respective surface.
+	netUpper := strings.ToUpper(is.GetNetwork())
+	parseMaxTxs := func(envVar string, def int) (int, error) {
+		if v, ok := os.LookupEnv(netUpper + envVar); ok {
+			n, err := strconv.Atoi(strings.TrimSpace(v))
+			if err != nil || n < 0 {
+				return 0, errors.Errorf("%s%s: invalid value %q (want a non-negative integer, 0 to disable)", netUpper, envVar, v)
+			}
+			return n, nil
+		}
+		return def, nil
+	}
+	wsDefault, restDefault := api.DefaultBalanceHistoryMaxTxsWS, api.DefaultBalanceHistoryMaxTxsREST
+	if shared, err := parseMaxTxs("_BALANCE_HISTORY_MAX_TXS", -1); err != nil {
+		return nil, err
+	} else if shared >= 0 {
+		wsDefault, restDefault = shared, shared
+	}
+	if is.BalanceHistoryMaxTxsWS, err = parseMaxTxs("_WS_BALANCE_HISTORY_MAX_TXS", wsDefault); err != nil {
+		return nil, err
+	}
+	if is.BalanceHistoryMaxTxsREST, err = parseMaxTxs("_REST_BALANCE_HISTORY_MAX_TXS", restDefault); err != nil {
+		return nil, err
+	}
+	logMaxTxs := func(surface string, n int) {
+		if n > 0 {
+			glog.Info("BalanceHistoryMaxTxs ", surface, " limit ", n, " transactions per request")
+		} else {
+			glog.Info("BalanceHistoryMaxTxs ", surface, " unlimited")
+		}
+	}
+	logMaxTxs("WS", is.BalanceHistoryMaxTxsWS)
+	logMaxTxs("REST", is.BalanceHistoryMaxTxsREST)
 	return is, nil
 }
 
@@ -763,8 +801,23 @@ func computeFeeStats(stopCompute chan os.Signal, blockFrom, blockTo int, db *db.
 	return err
 }
 
+// runStartupSelfHealing runs blocking, at-startup self-healing tasks once RocksDB is
+// initialized. It blocks until done so the rest of startup proceeds against a consistent DB.
+// Future self-healing tasks can be added here; today it reconciles missing historical fiat
+// rates before the periodic downloader loops start.
+func runStartupSelfHealing() {
+	if fiatRates != nil && fiatRates.Enabled {
+		// chanOsSignal is closed on shutdown, so a SIGTERM during a long reconciliation
+		// aborts it promptly instead of blocking startup-shutdown until the backfill ends.
+		fiatRates.ReconcileHistoricalRatesAtStartup(chanOsSignal)
+	}
+}
+
 func initDownloaders(db *db.RocksDB, chain bchain.BlockChain, config *common.Config) {
 	if fiatRates.Enabled {
+		// Block on startup self-healing before the periodic loops begin, so historical gaps
+		// are repaired via the CDN without contending with the Free-tier tip loop.
+		runStartupSelfHealing()
 		go fiatRates.RunDownloader()
 	}
 
