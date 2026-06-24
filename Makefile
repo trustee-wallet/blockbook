@@ -9,8 +9,12 @@ TCMALLOC =
 PORTABLE = 0
 ARGS ?=
 GITCOMMIT ?= $(shell git describe --always --dirty 2>/dev/null)
-# Forward BB_BUILD_ENV, BB_*_RPC_URL_*, BB_*_MQ_URL_*, BB_RPC_*, and BB_DEV_API_* overrides into Docker for build/test tooling.
-BB_RPC_ENV := $(shell env | awk -F= '/^BB_BUILD_ENV$$|^BB_(DEV|PROD)_RPC_URL_(HTTP|WS)_|^BB_(DEV|PROD)_MQ_URL_|^BB_RPC_(BIND_HOST|ALLOW_IP)_|^BB_DEV_API_URL_(HTTP|WS)_/ {print "-e " $$1}')
+# Forward the build-time override variables into Docker for build/test tooling.
+# The prefix set is the single source of truth in build/bb-build-var-prefixes.txt,
+# shared with .github/actions/export-env-vars and build/tools/templates.go.
+# (BB_BUILD_ENV is forwarded separately via -e BB_BUILD_ENV=... on each docker run.)
+BB_VAR_PREFIX_FILE := build/bb-build-var-prefixes.txt
+BB_RPC_ENV := $(shell env | awk -F= 'NR==FNR{line=$$0;gsub(/[[:space:]]/,"",line);if(substr(line,1,3)=="BB_")pfx[line]=1;next}{for(p in pfx){if(index($$1,p)==1){print "-e " $$1;next}}}' $(BB_VAR_PREFIX_FILE) -)
 
 TARGETS=$(subst .json,, $(shell ls configs/coins))
 
@@ -48,10 +52,10 @@ test-e2e:
 	contrib/tests/run-openapi-tests.sh
 
 test-connectivity: .bin-image
-	docker run -t --rm -e PACKAGER=$(PACKAGER) -e BB_BUILD_ENV=$(BB_BUILD_ENV) -e GITCOMMIT=$(GITCOMMIT) -e CONNECTIVITY_REGEX $(BB_RPC_ENV) -v "$(CURDIR):/src" --network="host" $(BIN_IMAGE) make test-connectivity ARGS="$(ARGS)"
+	docker run -t --rm -e PACKAGER=$(PACKAGER) -e BB_BUILD_ENV=$(BB_BUILD_ENV) -e GITCOMMIT=$(GITCOMMIT) -e CONNECTIVITY_REGEX -e BB_TEST_BACKEND_CONNECTIVITY $(BB_RPC_ENV) -v "$(CURDIR):/src" --network="host" $(BIN_IMAGE) make test-connectivity ARGS="$(ARGS)"
 
 test-all: .bin-image
-	docker run -t --rm -e PACKAGER=$(PACKAGER) -e BB_BUILD_ENV=$(BB_BUILD_ENV) -e GITCOMMIT=$(GITCOMMIT) $(BB_RPC_ENV) -v "$(CURDIR):/src" --network="host" $(BIN_IMAGE) make test-all ARGS="$(ARGS)"
+	docker run -t --rm -e PACKAGER=$(PACKAGER) -e BB_BUILD_ENV=$(BB_BUILD_ENV) -e GITCOMMIT=$(GITCOMMIT) -e BB_TEST_BACKEND_CONNECTIVITY $(BB_RPC_ENV) -v "$(CURDIR):/src" --network="host" $(BIN_IMAGE) make test-all ARGS="$(ARGS)"
 
 deb-backend-%: .deb-image
 	docker run -t --rm -e PACKAGER=$(PACKAGER) -e BB_BUILD_ENV=$(BB_BUILD_ENV) -e GITCOMMIT=$(GITCOMMIT) $(BB_RPC_ENV) -v /var/run/docker.sock:/var/run/docker.sock -v "$(CURDIR):/src" -v "$(CURDIR)/build:/out" $(DEB_IMAGE) /build/build-deb.sh backend $* $(ARGS)
