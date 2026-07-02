@@ -846,6 +846,22 @@ export interface WsLongTermFeeRateRes {
     /** Amount of blocks used for the long term fee rate estimation. */
     blocks: number;
 }
+export interface EthereumGasData {
+    /** Base fee per gas of the new block (post-London). */
+    baseFeePerGas?: string;
+    /** Total gas used by the new block (decimal). */
+    blockGasUsed?: string;
+    /** Gas limit of the new block (decimal). */
+    blockGasLimit?: string;
+}
+export interface WsNewBlock {
+    /** Height of the new block. */
+    height: number;
+    /** Hash of the new block. */
+    hash: string;
+    /** EVM gas data for the EIP-1559 base-fee projection; null on non-EVM chains. */
+    evmData: EthereumGasData | null;
+}
 export interface WsSendTransactionReq {
     /** Hex-encoded transaction data to broadcast (string format). */
     hex?: string;

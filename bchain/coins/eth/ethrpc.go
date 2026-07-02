@@ -1286,6 +1286,27 @@ func (b *EthereumRPC) GetBlockHash(height uint32) (string, error) {
 	return h.Hash(), nil
 }
 
+// returns early for pre-London blocks, populates EthereumBlockSpecificData
+func attachBlockGas(h *rpcHeader, existing *bchain.EthereumBlockSpecificData) *bchain.EthereumBlockSpecificData {
+	if h.BaseFeePerGas == "" {
+		return existing
+	}
+	bsd := existing
+	if bsd == nil {
+		bsd = &bchain.EthereumBlockSpecificData{}
+	}
+	if baseFee, err := hexutil.DecodeUint64(h.BaseFeePerGas); err == nil {
+		bsd.BaseFeePerGas = new(big.Int).SetUint64(baseFee)
+	}
+	if gasUsed, err := hexutil.DecodeUint64(h.GasUsed); err == nil {
+		bsd.GasUsed = new(big.Int).SetUint64(gasUsed)
+	}
+	if gasLimit, err := hexutil.DecodeUint64(h.GasLimit); err == nil {
+		bsd.GasLimit = new(big.Int).SetUint64(gasLimit)
+	}
+	return bsd
+}
+
 func (b *EthereumRPC) ethHeaderToBlockHeader(h *rpcHeader) (*bchain.BlockHeader, error) {
 	height, err := ethNumber(h.Number)
 	if err != nil {
@@ -1620,6 +1641,8 @@ func (b *EthereumRPC) GetBlock(hash string, height uint32) (*bchain.Block, error
 		}
 	}
 
+	blockSpecificData = attachBlockGas(&head, blockSpecificData)
+
 	btxs := make([]bchain.Tx, len(body.Transactions))
 	for i := range body.Transactions {
 		tx := &body.Transactions[i]
@@ -1847,6 +1870,66 @@ func (b *EthereumRPC) EthereumTypeEstimateGas(params map[string]interface{}) (ui
 	return b.Client.EstimateGas(ctx, msg)
 }
 
+// bigIntToFloat converts a wei amount to float64 for gauge export. float64 holds integers
+// exactly up to 2^53 (~9e15 wei), far above any realistic gas price, so no precision is lost;
+// keeping the metric in raw wei (base units) matches the repo convention and Grafana divides
+// by 1e9 to display Gwei.
+func bigIntToFloat(v *big.Int) float64 {
+	if v == nil {
+		return 0
+	}
+	f, _ := new(big.Float).SetInt(v).Float64()
+	return f
+}
+
+// observeEip1559Fees records the EIP-1559 fees the pull path just produced: per-tier
+// maxFeePerGas/maxPriorityFeePerGas and the underlying next-block base fee. Called only on the
+// two successful return paths (provider cache hit and on-chain estimate) so the gauges never
+// carry zeros from the error/disabled returns. Nil-guards mirror observeRequest.
+func (b *EthereumRPC) observeEip1559Fees(fees *bchain.Eip1559Fees) {
+	if b.metrics == nil || fees == nil {
+		return
+	}
+	if b.metrics.EthEip1559BaseFee != nil && fees.BaseFeePerGas != nil {
+		b.metrics.EthEip1559BaseFee.Set(bigIntToFloat(fees.BaseFeePerGas))
+	}
+	if b.metrics.EthEip1559Fee == nil {
+		return
+	}
+	for _, t := range []struct {
+		tier string
+		fee  *bchain.Eip1559Fee
+	}{
+		{"low", fees.Low}, {"medium", fees.Medium}, {"high", fees.High}, {"instant", fees.Instant},
+	} {
+		if t.fee == nil {
+			continue
+		}
+		if t.fee.MaxFeePerGas != nil {
+			b.metrics.EthEip1559Fee.With(common.Labels{"tier": t.tier, "kind": "max_fee"}).Set(bigIntToFloat(t.fee.MaxFeePerGas))
+		}
+		if t.fee.MaxPriorityFeePerGas != nil {
+			b.metrics.EthEip1559Fee.With(common.Labels{"tier": t.tier, "kind": "priority_fee"}).Set(bigIntToFloat(t.fee.MaxPriorityFeePerGas))
+		}
+	}
+}
+
+// observeEip1559FeeSource records which source served a pull-path estimate, observed at the serve
+// boundary: the alternative provider cache (provider), the on-chain estimate after a stale/unready
+// provider (onchain_fallback), or the on-chain estimate with no provider configured (onchain).
+func (b *EthereumRPC) observeEip1559FeeSource(source string) {
+	if b.metrics == nil || b.metrics.EthEip1559FeeSource == nil {
+		return
+	}
+	b.metrics.EthEip1559FeeSource.With(common.Labels{"source": source}).Inc()
+}
+
+// eip1559BaseFeeMultiplier is the headroom applied to the projected base fee when deriving
+// maxFeePerGas for the on-chain EIP-1559 estimate (maxFeePerGas = multiplier*baseFee + tip).
+// 2x is the EIP-1559-standard buffer: it keeps a transaction mineable across ~6 consecutive full
+// blocks, since the base fee can rise at most 12.5% per block (1.125^6 ≈ 2). Tunable.
+const eip1559BaseFeeMultiplier = 2
+
 // EthereumTypeGetEip1559Fees retrieves Eip1559Fees, if supported
 func (b *EthereumRPC) EthereumTypeGetEip1559Fees() (*bchain.Eip1559Fees, error) {
 	if !b.ChainConfig.Eip1559Fees {
@@ -1859,6 +1942,8 @@ func (b *EthereumRPC) EthereumTypeGetEip1559Fees() (*bchain.Eip1559Fees, error) 
 			return nil, err
 		}
 		if fees != nil {
+			b.observeEip1559FeeSource("provider")
+			b.observeEip1559Fees(fees)
 			return fees, nil
 		}
 		// Fall back to on-chain estimation when the alternative provider is unsupported/stale/unready,
@@ -1868,12 +1953,6 @@ func (b *EthereumRPC) EthereumTypeGetEip1559Fees() (*bchain.Eip1559Fees, error) 
 	// otherwise use algorithm from here https://docs.alchemy.com/docs/how-to-build-a-gas-fee-estimator-using-eip-1559
 	ctx, cancel := context.WithTimeout(context.Background(), b.Timeout)
 	defer cancel()
-
-	var maxPriorityFeePerGas hexutil.Big
-	err := b.RPC.CallContext(ctx, &maxPriorityFeePerGas, "eth_maxPriorityFeePerGas")
-	if err != nil {
-		return nil, err
-	}
 
 	var fees bchain.Eip1559Fees
 
@@ -1892,7 +1971,7 @@ func (b *EthereumRPC) EthereumTypeGetEip1559Fees() (*bchain.Eip1559Fees, error) 
 	}
 	blocks := 4
 
-	err = b.RPC.CallContext(ctx, &h, "eth_feeHistory", blocks, "pending", percentiles)
+	err := b.RPC.CallContext(ctx, &h, "eth_feeHistory", blocks, "pending", percentiles)
 	if err != nil {
 		return nil, err
 	}
@@ -1903,21 +1982,49 @@ func (b *EthereumRPC) EthereumTypeGetEip1559Fees() (*bchain.Eip1559Fees, error) 
 	hs, _ := json.Marshal(h)
 	baseFee, _ := hexutil.DecodeUint64(h.BaseFeePerGas[blocks-1])
 	fees.BaseFeePerGas = big.NewInt(int64(baseFee))
-	maxBasePriorityFee := maxPriorityFeePerGas.ToInt().Int64()
-	glog.Info("eth_maxPriorityFeePerGas ", maxPriorityFeePerGas)
+	// We expose only baseFeePerGas here and deliberately do NOT add a separate "next block" base-fee
+	// field. eth_feeHistory returns one extra projected element beyond the requested range, but its
+	// meaning is backend-dependent: nodes with no distinct pending block (e.g. Erigon, which ethereum
+	// mainnet uses) drop the extra element, so baseFeePerGas[blocks-1] is already the next block's
+	// projected fee; other backends (some L2s) keep it and shift the indices, making the extra element
+	// either N+1 or an N+2 estimate computed off an incomplete pending block. No single field can
+	// describe all of these. Clients that need an exact next-block base fee should use the
+	// subscribeNewBlock evmData push, which carries the real previous-block header.
 	glog.Info("eth_feeHistory ", string(hs))
 
 	for i := 0; i < 4; i++ {
 		var f bchain.Eip1559Fee
+		// Per-tier tip: average of the requested reward percentile (low=20th .. instant=99th) over the window.
+		// A compliant eth_feeHistory row has one reward per requested percentile, but guard the column index
+		// so a non-conforming backend returning a short row skips that row instead of panicking; the divisor
+		// counts only the rows actually summed so skipped rows don't deflate the average.
 		priorityFee := int64(0)
+		rows := int64(0)
 		for j := 0; j < len(h.Reward); j++ {
+			if len(h.Reward[j]) <= i {
+				continue
+			}
 			p, _ := hexutil.DecodeUint64(h.Reward[j][i])
 			priorityFee += int64(p)
+			rows++
 		}
-		priorityFee = priorityFee / int64(len(h.Reward))
-		f.MaxFeePerGas = big.NewInt(priorityFee)
-		f.MaxPriorityFeePerGas = big.NewInt(maxBasePriorityFee)
-		maxBasePriorityFee *= 2
+		if rows > 0 {
+			priorityFee /= rows
+		}
+		// A zero tip is a deliberate, accepted outcome on idle chains: when eth_feeHistory reports empty or
+		// all-zero reward percentiles (quiet testnets such as Sepolia/Holesky, or a backend that omits
+		// rewards) there is no priority competition to price, so maxPriorityFeePerGas is 0. maxFeePerGas
+		// still covers eip1559BaseFeeMultiplier*baseFee below, so the tx stays mineable.
+		tip := big.NewInt(priorityFee)
+		f.MaxPriorityFeePerGas = tip
+		// maxFeePerGas must cover the next-block base fee plus the tip, with headroom for base-fee
+		// growth while the tx waits: maxFeePerGas = eip1559BaseFeeMultiplier*baseFee + tip. The previous
+		// code put only the tip here (omitting the base fee), which is below the base fee and therefore
+		// not mineable; clients such as Trezor Suite use maxFeePerGas directly.
+		f.MaxFeePerGas = new(big.Int).Add(
+			new(big.Int).Mul(fees.BaseFeePerGas, big.NewInt(eip1559BaseFeeMultiplier)),
+			tip,
+		)
 		switch i {
 		case 0:
 			fees.Low = &f
@@ -1929,6 +2036,14 @@ func (b *EthereumRPC) EthereumTypeGetEip1559Fees() (*bchain.Eip1559Fees, error) 
 			fees.Instant = &f
 		}
 	}
+	// Reaching here with a provider configured means its cache was stale/unready (a hit would have
+	// returned above), so this on-chain estimate is a fallback.
+	source := "onchain"
+	if b.alternativeFeeProvider != nil {
+		source = "onchain_fallback"
+	}
+	b.observeEip1559FeeSource(source)
+	b.observeEip1559Fees(&fees)
 	return &fees, err
 }
 

@@ -373,6 +373,33 @@ metrics:
     type: counter_vec
     help: Requests to external fee providers, labeled by provider and outcome status
     labels: [provider, status]
+  alternative_fee_provider_last_sync_timestamp_seconds:
+    name: blockbook_alternative_fee_provider_last_sync_timestamp_seconds
+    type: gauge_vec
+    help: Unix time of the last successful refresh of the cached EVM alternative-provider fees, labeled by provider (infura or 1inch). Plot time() - this for cache age; the pull path falls back to on-chain once the cache is older than the provider's stale window (for infura, 30x the poll period, e.g. 30m at a 60s poll). Exported as a timestamp rather than a computed *_age_seconds gauge on purpose - it is only written on a successful refresh, so age keeps rising when a provider wedges and it is restart-safe
+    labels: [provider]
+  eth_eip1559_fee:
+    name: blockbook_eth_eip1559_fee
+    type: gauge_vec
+    help: Most recent EIP-1559 fee tier served by the pull path (estimateFee / EthereumTypeGetEip1559Fees), in wei - divide by 1e9 for Gwei; labeled by tier (low/medium/high/instant) and kind (max_fee = maxFeePerGas, priority_fee = maxPriorityFeePerGas). EVM fees are otherwise invisible (estimated_fee is UTXO-only). Last-writer-wins per estimate, like estimated_fee
+    labels: [tier, kind]
+  eth_eip1559_base_fee:
+    name: blockbook_eth_eip1559_base_fee
+    type: gauge
+    help: Base fee underlying the most recent pull-path EIP-1559 estimate, in wei - divide by 1e9 for Gwei. The alternative provider's reported base fee when served from a provider, otherwise eth_feeHistory's last requested-window base fee (baseFeePerGas[blocks-1]); on backends that drop the extra projected element (e.g. Erigon) that is already the next-block projection, on others it is the most recent included block. Pair with eth_block_base_fee to see projection vs realized
+  eth_eip1559_fee_source_total:
+    name: blockbook_eth_eip1559_fee_source_total
+    type: counter_vec
+    help: Served EIP-1559 pull-path estimates by source observed at the serve boundary - provider (alternative provider cache hit), onchain_fallback (provider configured but cache stale/unready, served from eth_feeHistory) or onchain (no provider configured). Complements alternative_fee_provider_requests (background fetch) and alternative_fee_provider_last_sync_timestamp_seconds (cache age), which together explain why a fallback happened
+    labels: [source]
+  eth_block_gas_used_ratio:
+    name: blockbook_eth_block_gas_used_ratio
+    type: gauge
+    help: gasUsed / gasLimit of the most recently connected EVM block (0..1), the congestion signal that drives the next base fee - above 0.5 the next block's base fee rises (up to +12.5% per block), below 0.5 it falls. This is the push path's view of why fees move; updated once per connected block, so it sweeps catch-up blocks and settles on the tip
+  eth_block_base_fee:
+    name: blockbook_eth_block_base_fee
+    type: gauge
+    help: Base fee per gas of the most recently connected EVM block, in wei - divide by 1e9 for Gwei. The realized base fee from the block header (push path); compare with eth_eip1559_base_fee (the pull path's next-block projection) to see whether the projection tracks the chain. Updated once per connected block
   eth_sync_rpc_errors:
     name: blockbook_eth_sync_rpc_errors
     type: counter_vec

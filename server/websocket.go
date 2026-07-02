@@ -1411,24 +1411,60 @@ func (s *WebsocketServer) unsubscribeFiatRates(c *websocketChannel) (res interfa
 	return &subscriptionResponse{false}, nil
 }
 
-func (s *WebsocketServer) onNewBlockAsync(hash string, height uint32) {
+// newBlockNotification builds the subscribeNewBlock payload for a connected block. For EVM chains it
+// attaches block-level gas data so subscribers can project the next EIP-1559 base fee; EVMData stays
+// nil (evmData: null) for non-EVM chains and pre-London blocks (BaseFeePerGas absent).
+func newBlockNotification(block *bchain.Block) *WsNewBlock {
+	data := &WsNewBlock{
+		Height: block.Height,
+		Hash:   block.Hash,
+	}
+	if bsd, ok := block.CoinSpecificData.(*bchain.EthereumBlockSpecificData); ok && bsd != nil && bsd.BaseFeePerGas != nil {
+		data.EVMData = &EthereumGasData{
+			BaseFeePerGas: (*api.Amount)(bsd.BaseFeePerGas),
+			BlockGasUsed:  (*api.Amount)(bsd.GasUsed),
+			BlockGasLimit: (*api.Amount)(bsd.GasLimit),
+		}
+	}
+	return data
+}
+
+// observeNewBlockGas records push-path block-gas metrics from the most recently connected block.
+// It is called synchronously from OnNewBlock (which the single writeBlockWorker invokes in height
+// order) before the async broadcast, so the gauges advance monotonically without a mutex; the
+// per-block broadcast goroutines could otherwise reorder and let an older block clobber a newer
+// value. Last-value semantics: it sweeps catch-up blocks and settles on the tip. Non-EVM and
+// pre-London blocks (no EthereumBlockSpecificData with gas set) are skipped.
+func (s *WebsocketServer) observeNewBlockGas(block *bchain.Block) {
+	if s.metrics == nil {
+		return
+	}
+	bsd, ok := block.CoinSpecificData.(*bchain.EthereumBlockSpecificData)
+	if !ok || bsd == nil {
+		return
+	}
+	if s.metrics.EthBlockGasUsedRatio != nil && bsd.GasUsed != nil && bsd.GasLimit != nil && bsd.GasLimit.Sign() > 0 {
+		ratio, _ := new(big.Float).Quo(new(big.Float).SetInt(bsd.GasUsed), new(big.Float).SetInt(bsd.GasLimit)).Float64()
+		s.metrics.EthBlockGasUsedRatio.Set(ratio)
+	}
+	if s.metrics.EthBlockBaseFee != nil && bsd.BaseFeePerGas != nil {
+		baseFee, _ := new(big.Float).SetInt(bsd.BaseFeePerGas).Float64()
+		s.metrics.EthBlockBaseFee.Set(baseFee)
+	}
+}
+
+func (s *WebsocketServer) onNewBlockAsync(block *bchain.Block) {
 	s.newBlockSubscriptionsLock.Lock()
 	defer s.newBlockSubscriptionsLock.Unlock()
-	data := struct {
-		Height uint32 `json:"height"`
-		Hash   string `json:"hash"`
-	}{
-		Height: height,
-		Hash:   hash,
-	}
+	data := newBlockNotification(block)
 	for c, id := range s.newBlockSubscriptions {
 		c.DataOut(&WsRes{
 			ID:   id,
-			Data: &data,
+			Data: data,
 		})
 	}
 	s.metrics.WebsocketNewBlockNotifications.Add(float64(len(s.newBlockSubscriptions)))
-	glog.V(2).Info("broadcasting new block ", height, " ", hash, " to ", len(s.newBlockSubscriptions), " channels")
+	glog.V(2).Info("broadcasting new block ", block.Height, " ", block.Hash, " to ", len(s.newBlockSubscriptions), " channels")
 }
 
 // setConfirmedBlockTxMetadata normalizes parsed block transactions.
@@ -1582,9 +1618,12 @@ func (s *WebsocketServer) publishNewBlockTxsByAddr(block *bchain.Block) {
 
 // OnNewBlock is a callback that broadcasts info about new block to subscribed clients
 func (s *WebsocketServer) OnNewBlock(block *bchain.Block) {
+	// Synchronous and before the async dispatch: OnNewBlock is called in monotonic height order, so
+	// the push-path gas gauges never get an older block's value written after a newer one's.
+	s.observeNewBlockGas(block)
 	s.addressSubscriptionsLock.Lock()
 	defer s.addressSubscriptionsLock.Unlock()
-	go s.onNewBlockAsync(block.Hash, block.Height)
+	go s.onNewBlockAsync(block)
 	if s.newBlockTxsSubscriptionCount > 0 {
 		// Skip per-tx address matching when nobody opted into newBlockTxs.
 		if ok, _ := s.trackWork(); ok {

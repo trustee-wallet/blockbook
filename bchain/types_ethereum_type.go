@@ -231,6 +231,11 @@ type EthereumBlockSpecificData struct {
 	InternalDataError   string               `ts_doc:"Error message for processing block internal data, if any."`
 	AddressAliasRecords []AddressAliasRecord `ts_doc:"List of address-to-alias mappings discovered in this block."`
 	Contracts           []ContractInfo       `ts_doc:"List of contracts created or updated in this block."`
+	// GasUsed/GasLimit/BaseFeePerGas are transient block-level EIP-1559 figures used for the new-block
+	// notification; they are not persisted (storeBlockSpecificDataEthereumType ignores them).
+	GasUsed       *big.Int `json:"-"`
+	GasLimit      *big.Int `json:"-"`
+	BaseFeePerGas *big.Int `json:"-"`
 }
 
 // StakingPoolData holds data about address participation in a staking pool contract
