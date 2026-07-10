@@ -1727,6 +1727,77 @@ func (b *EthereumRPC) removeTransactionFromMempool(txid string) {
 	}
 }
 
+// callContextWithTimeout issues a single JSON-RPC call under its own fresh b.Timeout
+// deadline, so sequential calls in a recovery sequence do not share (and progressively
+// shrink) one deadline budget.
+func (b *EthereumRPC) callContextWithTimeout(result interface{}, method string, args ...interface{}) error {
+	ctx, cancel := context.WithTimeout(context.Background(), b.Timeout)
+	defer cancel()
+	return b.RPC.CallContext(ctx, result, method, args...)
+}
+
+// txFromBlockBody fetches the full block body and returns the transaction matching txid, or
+// nil if the fetch fails or the transaction is not present. This is the recovery fallback
+// used when the O(1) positional lookup is unavailable.
+func (b *EthereumRPC) txFromBlockBody(txid, blockHash string) *bchain.RpcTransaction {
+	raw, err := b.getBlockRaw(blockHash, 0, true)
+	if err != nil {
+		glog.Warningf("recoverMinedTransaction %s: getBlockRaw %s failed: %v", txid, blockHash, err)
+		return nil
+	}
+	var body rpcBlockTransactions
+	if err := json.Unmarshal(raw, &body); err != nil {
+		glog.Warningf("recoverMinedTransaction %s: decode block %s failed: %v", txid, blockHash, err)
+		return nil
+	}
+	for i := range body.Transactions {
+		if strings.EqualFold(body.Transactions[i].Hash, txid) {
+			return &body.Transactions[i]
+		}
+	}
+	return nil
+}
+
+// recoverMinedTransaction reconstructs a mined transaction that eth_getTransactionByHash
+// returned null because the backend pruned its tx-by-hash index (observed on QuikNode Base).
+// It looks the tx up by the receipt's (blockHash, transactionIndex) and returns it with the
+// receipt for reuse. Returns (nil, nil) when the tx is genuinely unknown or recovery fails,
+// so the caller yields ErrTxNotFound; recovery-lookup failures are logged, not propagated.
+func (b *EthereumRPC) recoverMinedTransaction(txid string) (*bchain.RpcTransaction, *bchain.RpcReceipt) {
+	// The receipt still works on such backends and carries the block hash and tx index;
+	// decode it in one pass (embedding RpcReceipt) so it can be reused for EthTxToTx.
+	var receipt struct {
+		bchain.RpcReceipt
+		BlockHash        string `json:"blockHash"`
+		TransactionIndex string `json:"transactionIndex"`
+	}
+	if err := b.callContextWithTimeout(&receipt, "eth_getTransactionReceipt", ethcommon.HexToHash(txid)); err != nil {
+		glog.Warningf("recoverMinedTransaction %s: eth_getTransactionReceipt failed: %v", txid, err)
+		return nil, nil
+	}
+	if receipt.BlockHash == "" {
+		// No receipt: the transaction is genuinely unknown to the backend.
+		return nil, nil
+	}
+	// Fast path: fetch the single tx by (blockHash, index) - an O(1), ~900x smaller lookup
+	// than scanning the whole block body. transactionIndex is already a hex quantity.
+	tx := &bchain.RpcTransaction{}
+	err := b.callContextWithTimeout(tx, "eth_getTransactionByBlockHashAndIndex", ethcommon.HexToHash(receipt.BlockHash), receipt.TransactionIndex)
+	if err == nil && strings.EqualFold(tx.Hash, txid) {
+		return tx, &receipt.RpcReceipt
+	}
+	if err != nil {
+		glog.Warningf("recoverMinedTransaction %s: eth_getTransactionByBlockHashAndIndex %s/%s failed, falling back to block body: %v", txid, receipt.BlockHash, receipt.TransactionIndex, err)
+	}
+	// Fallback for backends that prune tx-by-hash but do not serve the positional lookup (or
+	// returned an empty/mismatched result): scan the block body, as before the optimization.
+	if scanned := b.txFromBlockBody(txid, receipt.BlockHash); scanned != nil {
+		return scanned, &receipt.RpcReceipt
+	}
+	glog.Warningf("recoverMinedTransaction %s: not recoverable from block %s (index %s)", txid, receipt.BlockHash, receipt.TransactionIndex)
+	return nil, nil
+}
+
 // GetTransaction returns a transaction by the transaction ID.
 func (b *EthereumRPC) GetTransaction(txid string) (*bchain.Tx, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), b.Timeout)
@@ -1745,9 +1816,23 @@ func (b *EthereumRPC) GetTransaction(txid string) (*bchain.Tx, error) {
 			return nil, err
 		}
 	}
+	// recoveredReceipt is set only when the transaction was reconstructed via the pruned-index
+	// fallback below; the mined branch reuses it instead of fetching the receipt again.
+	var recoveredReceipt *bchain.RpcReceipt
 	if *tx == (bchain.RpcTransaction{}) {
-		b.removeTransactionFromMempool(txid)
-		return nil, bchain.ErrTxNotFound
+		// eth_getTransactionByHash returned null. Some archive backends (observed on
+		// QuikNode Base) prune the transaction-by-hash index beyond a recent window
+		// while still serving block bodies and receipts, so a mined transaction older
+		// than that window is invisible to this call even though it is fully retained.
+		// Recover it from its receipt (which carries the block hash and index) before
+		// treating it as not found.
+		if recovered, receipt := b.recoverMinedTransaction(txid); recovered != nil {
+			tx = recovered
+			recoveredReceipt = receipt
+		} else {
+			b.removeTransactionFromMempool(txid)
+			return nil, bchain.ErrTxNotFound
+		}
 	}
 	var btx *bchain.Tx
 	if tx.BlockNumber == "" {
@@ -1774,9 +1859,13 @@ func (b *EthereumRPC) GetTransaction(txid string) (*bchain.Tx, error) {
 			return nil, errors.Annotatef(err, "txid %v", txid)
 		}
 		tx.BaseFeePerGas = ht.BaseFeePerGas
-		receipt, err := b.EthereumTypeGetTransactionReceipt(txid)
-		if err != nil {
-			return nil, errors.Annotatef(err, "txid %v", txid)
+		// Reuse the receipt already fetched during pruned-index recovery; otherwise fetch it.
+		receipt := recoveredReceipt
+		if receipt == nil {
+			receipt, err = b.EthereumTypeGetTransactionReceipt(txid)
+			if err != nil {
+				return nil, errors.Annotatef(err, "txid %v", txid)
+			}
 		}
 		n, err := ethNumber(tx.BlockNumber)
 		if err != nil {
