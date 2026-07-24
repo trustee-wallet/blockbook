@@ -51,6 +51,7 @@ import (
 	"github.com/trezor/blockbook/bchain/coins/qtum"
 	"github.com/trezor/blockbook/bchain/coins/ravencoin"
 	"github.com/trezor/blockbook/bchain/coins/ritocoin"
+	"github.com/trezor/blockbook/bchain/coins/robinhood"
 	"github.com/trezor/blockbook/bchain/coins/snowgem"
 	"github.com/trezor/blockbook/bchain/coins/trezarcoin"
 	"github.com/trezor/blockbook/bchain/coins/tron"
@@ -80,8 +81,6 @@ func init() {
 	BlockChainFactories["Ethereum Classic"] = eth.NewEthereumRPC
 	BlockChainFactories["Ethereum Testnet Sepolia"] = eth.NewEthereumRPC
 	BlockChainFactories["Ethereum Testnet Sepolia Archive"] = eth.NewEthereumRPC
-	BlockChainFactories["Ethereum Testnet Holesky"] = eth.NewEthereumRPC
-	BlockChainFactories["Ethereum Testnet Holesky Archive"] = eth.NewEthereumRPC
 	BlockChainFactories["Ethereum Testnet Hoodi"] = eth.NewEthereumRPC
 	BlockChainFactories["Ethereum Testnet Hoodi Archive"] = eth.NewEthereumRPC
 	BlockChainFactories["Bcash"] = bch.NewBCashRPC
@@ -153,6 +152,8 @@ func init() {
 	BlockChainFactories["Arbitrum Nova Archive"] = arbitrum.NewArbitrumRPC
 	BlockChainFactories["Base"] = base.NewBaseRPC
 	BlockChainFactories["Base Archive"] = base.NewBaseRPC
+	BlockChainFactories["Robinhood Archive"] = robinhood.NewRobinhoodRPC
+	BlockChainFactories["Robinhood Testnet"] = robinhood.NewRobinhoodRPC
 	BlockChainFactories["Tron"] = tron.NewTronRPC
 	BlockChainFactories["Tron Testnet Nile"] = tron.NewTronRPC
 }
