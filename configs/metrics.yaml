@@ -195,7 +195,7 @@ metrics:
   index_resync_errors:
     name: blockbook_index_resync_errors
     type: counter_vec
-    help: Index resync loop failures, labeled by coarse error outcome
+    help: 'Index resync loop failures, labeled by where the failure came from - get_block_hash and get_block mean the backend did not answer, connect_block means fetching or connecting a block failed inside a sync worker, and resync means the resync iteration returned an error that was not attributed further. Sustained get_block_hash or get_block is a backend problem; sustained connect_block is a Blockbook or database problem. Retryable per-block misses are counted here too and may still recover within the same iteration, so alert on a sustained rate rather than on any single increment'
     labels: [error]
   index_block_not_found_retries:
     name: blockbook_index_block_not_found_retries
@@ -223,7 +223,12 @@ metrics:
   mempool_size:
     name: blockbook_mempool_size
     type: gauge
-    help: Transactions retained from the last successful backend reload
+    help: Transactions retained from the last successful backend reload. Only written on success, so it freezes at the last good value when the reload loop breaks rather than signalling the failure - use mempool_last_sync_timestamp_seconds for that. Healthy magnitudes differ by orders of magnitude between chains (a Bitcoin peak near 1.6e5 against a Polygon peak above 5e6), so any threshold on it has to be per-coin or relative to the coin's own recent average
+  mempool_last_sync_timestamp_seconds:
+    name: blockbook_mempool_last_sync_timestamp_seconds
+    type: gauge_vec
+    labels: [chain]
+    help: Unix time of the last SUCCESSFUL mempool reload. Plot time() - this for reload staleness; a value climbing past a few multiples of resyncmempoolperiod (default ~60s) means the reload loop is failing or wedged. A gauge_vec rather than a plain gauge so the series is ABSENT until the first successful reload - a plain gauge would read 0 from process start and make time() - it page for the whole initial sync, before any reload has run. Exported as a timestamp rather than a computed *_age_seconds gauge on purpose - it is only written on success, so the age keeps rising while reloads fail, and it is restart-safe. This is the metric to alert on, in preference to the /api/ inSyncMempool flag - that flag is cleared at the START of every reload, so it reads "not syncing" for a large fraction of samples on a healthy node and cannot carry an alert
   eth_alternative_mempool_reconciliation_events_total:
     name: blockbook_eth_alternative_mempool_reconciliation_events_total
     type: counter_vec
@@ -252,7 +257,7 @@ metrics:
   avg_block_period:
     name: blockbook_avg_block_period
     type: gauge
-    help: Observed average spacing of the last 100 blocks' header timestamps, in seconds (chain pace, not indexing cadence)
+    help: Observed average spacing of the last 100 blocks' header timestamps, in fractional seconds (chain pace, not indexing cadence). 0 means "not yet computed" - fewer than 102 block times are loaded, which is the case early in an initial build or a reindex, and for a while after a restart until the block-time array is reloaded. A rule that gates on this being > 0 therefore switches itself off during exactly those windows; normalize by average_block_time_seconds instead, which comes from the coin's configuration and is stable across restarts
   sync_block_stats:
     name: blockbook_sync_block_stats
     type: gauge_vec
@@ -303,10 +308,14 @@ metrics:
     name: blockbook_best_height
     type: gauge
     help: Newest block height persisted in Blockbook's index
+  initial_sync:
+    name: blockbook_initial_sync
+    type: gauge
+    help: 1 while the initial index build (or a full reindex) is running, 0 in steady state. Mirrors the initialSync field of /api/ and flips at the moment the flag does, not on the next periodic refresh. blockbook_synchronized is 0 for the whole of such a build - hours on a UTXO chain, days on an EVM archive - so a bare synchronized == 0 alert pages continuously through every planned resync and ends up silenced; gate it on this gauge instead (synchronized == 0 unless initial_sync == 1) so the alert only fires for an unplanned stall
   synchronized:
     name: blockbook_synchronized
     type: gauge
-    help: 1 when /api/status reports inSync, 0 otherwise; sustained 0 outside initial sync means the index is not keeping up with the tip, for example after a stalled tip feed
+    help: 1 when /api/status reports inSync, 0 otherwise; sustained 0 outside initial sync means the index is not keeping up with the tip, for example after a stalled tip feed. Refreshed on every sync-loop iteration, so a stall shows up within one resync rather than on the next periodic metrics tick; pair it with blockbook_initial_sync to exclude planned reindexes
   backend_best_height:
     name: blockbook_backend_best_height
     type: gauge
@@ -314,7 +323,7 @@ metrics:
   tip_age_seconds:
     name: blockbook_tip_age_seconds
     type: gauge
-    help: Seconds since polling last observed the backend best height advance
+    help: Seconds since the backend's reported block height was last observed to change. The reference timestamp is persisted, so the age survives a restart; any change counts, so a rollback or a replaced backend at a lower height cannot wedge it. This tracks the BACKEND, not the index - a stalled indexer sitting behind a healthy backend keeps this near zero, and was observed doing exactly that through a 17-hour outage. Use delta(blockbook_best_height) against delta(blockbook_backend_best_height) to detect a stalled indexer, and this gauge to detect a backend or tip feed that went quiet
   backend_subscription_age_seconds:
     name: blockbook_backend_subscription_age_seconds
     type: gauge

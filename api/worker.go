@@ -2645,15 +2645,27 @@ func nonZeroTime(t time.Time) *time.Time {
 }
 
 const (
-	systemInfoSyncStartGrace      = 5 * time.Second
-	systemInfoEthereumStaleBlocks = 12
-	// systemInfoEthereumSyncedGap is how far the indexed height may trail the
-	// backend tip and still count as synchronized. It covers the one-block window
-	// between the feed tip advancing and that block being connected, which would
-	// otherwise flap the status on a fast/archive EVM chain.
-	systemInfoEthereumSyncedGap = 1
+	systemInfoSyncStartGrace = 5 * time.Second
+	systemInfoStaleBlocks    = 12
+	// systemInfoMinStale floors the window systemInfoStaleBlocks derives from the chain
+	// cadence. Twelve block times is 3s on Arbitrum and 1.2s on Robinhood, under ordinary
+	// RPC and GC jitter. eth.TipStaleThreshold clamps its analogous window the same way,
+	// and the floor is what lets a fast chain's configured cadence be corrected downwards
+	// without tightening this check.
+	systemInfoMinStale = 30 * time.Second
+	// systemInfoSyncedGap is how far the indexed height may trail the backend tip and
+	// still count as synchronized. It covers the one-block window between the tip
+	// advancing and that block being connected, which would otherwise flap the status.
+	systemInfoSyncedGap = 1
 )
 
+// systemInfoInSync decides the externally reported in-sync state from the raw
+// IsSynchronized flag plus a freshness/tip check. The tip rescue (out-of-sync -> synced)
+// applies to any chain with a known block period, not only EVM: the raw flag is cleared for
+// the whole of every resync iteration, so without it a chain that takes longer than the
+// start grace to connect a batch reads out-of-sync mid-iteration even though its index is
+// at the tip. The demotion (synced -> out-of-sync on a stale index) stays EVM-only; see the
+// comment on it. A chain with no configured cadence (blockPeriod <= 0) keeps the raw flag.
 func systemInfoInSync(inSync bool, initialSync bool, chainType bchain.ChainType, bestHeight uint32, backendBlocks int, lastBlockTime, startSync, now time.Time, blockPeriod time.Duration) bool {
 	if !inSync && !initialSync {
 		// If less than 5 seconds into syncing, return inSync=true to avoid short
@@ -2663,28 +2675,110 @@ func systemInfoInSync(inSync bool, initialSync bool, chainType bchain.ChainType,
 		}
 	}
 
-	if chainType != bchain.ChainEthereumType || blockPeriod <= 0 {
+	if blockPeriod <= 0 {
 		return inSync
 	}
 
-	threshold := systemInfoEthereumStaleBlocks * blockPeriod
+	threshold := systemInfoStaleBlocks * blockPeriod
+	if threshold < systemInfoMinStale {
+		threshold = systemInfoMinStale
+	}
 	isFresh := !lastBlockTime.Add(threshold).Before(now)
 
-	// Long EVM archive syncs can stay inside ResyncIndex while new blocks keep
-	// arriving. If the indexed height is at (or within one block of) the backend
-	// tip and the index was updated recently, report the externally observable
-	// state as synchronized. int64 avoids underflow if the backend momentarily
-	// reports a lower tip; gap >= 0 keeps an "ahead of tip" read from qualifying.
+	// A sync loop can stay inside ResyncIndex while new blocks keep arriving. If the
+	// indexed height is at (or within one block of) the backend tip and the index was
+	// updated recently, report the externally observable state as synchronized. int64
+	// avoids underflow if the backend momentarily reports a lower tip; gap >= 0 keeps an
+	// "ahead of tip" read from qualifying.
 	gap := int64(backendBlocks) - int64(bestHeight)
-	if !inSync && !initialSync && gap >= 0 && gap <= systemInfoEthereumSyncedGap && isFresh {
+	if !inSync && !initialSync && gap >= 0 && gap <= systemInfoSyncedGap && isFresh {
 		return true
 	}
 
-	if inSync && !isFresh {
+	// Demote a synced-but-stale index on EVM chains only. Their tip arrives over a newHeads
+	// subscription that can die silently, their spacing is near-deterministic, and 12 block
+	// times floored at 30s leaves large headroom. UTXO block arrival is Poisson: a natural
+	// gap past 12 mean spacings is ~6e-6 per block, and Bitcoin's configured 600s against
+	// an observed ~682s makes the window tighter than nominal, so across the fleet this
+	// would demote healthy nodes a few times a year and page via blockbookApiInSync. A
+	// stalled UTXO indexer is caught by BlockbookIndexStalled (blockbook_best_height against
+	// blockbook_backend_best_height), which is chain-agnostic and does not read this flag.
+	if inSync && !isFresh && chainType == bchain.ChainEthereumType {
 		return false
 	}
 
 	return inSync
+}
+
+// syncBlockPeriod returns the block cadence the sync freshness checks normalize by.
+// It prefers the configured averageBlockTimeMs - stable, available before enough blocks
+// are observed, sub-second capable, and the same value the tip watchdog uses - and falls
+// back to the observed average. Shared by GetSystemInfo and RefreshSyncMetrics so the
+// /api/ inSync field and the blockbook_synchronized gauge cannot disagree.
+func syncBlockPeriod(chain bchain.BlockChain, is *common.InternalState) time.Duration {
+	// Fractional seconds: the integer GetAvgBlockPeriod truncates a sub-second cadence to
+	// 0, and a 0 here makes systemInfoInSync return at blockPeriod <= 0, silently skipping
+	// the freshness and tip-gap checks on exactly the sub-second EVM chains this targets.
+	blockPeriod := time.Duration(is.GetAvgBlockPeriodSeconds() * float64(time.Second))
+	if p, ok := chain.(interface {
+		AverageBlockTimeDuration() (time.Duration, error)
+	}); ok {
+		if d, err := p.AverageBlockTimeDuration(); err == nil && d > 0 {
+			blockPeriod = d
+		}
+	}
+	return blockPeriod
+}
+
+// syncChainType returns the chain type systemInfoInSync gates its demotion on. A chain or
+// parser that is not wired up yet (startup, and the unit tests) degrades to the UTXO type,
+// which is the side of the gate that leaves the raw flag alone.
+func syncChainType(chain bchain.BlockChain) bchain.ChainType {
+	if chain == nil {
+		return bchain.ChainBitcoinType
+	}
+	if p := chain.GetChainParser(); p != nil {
+		return p.GetChainType()
+	}
+	return bchain.ChainBitcoinType
+}
+
+// RefreshSyncMetrics publishes the sync-state gauges from internal state and the cached
+// backend info with no backend round trip, so it can run on a short timer. These gauges
+// used to be written only by the ~15-minute app-info loop, which needs three RPCs, so a
+// stall stayed invisible for up to 16 minutes. backend_best_height is held back until a
+// height has been observed, since a 0 reads as "no blocks produced" to the stuck rules.
+func RefreshSyncMetrics(is *common.InternalState, chain bchain.BlockChain, metrics *common.Metrics) {
+	if is == nil || metrics == nil {
+		return
+	}
+	// One locked snapshot: taking backend info, the initial-sync flag and the sync state
+	// through separate accessors let a concurrent resync land between them and tear the
+	// backend-vs-indexed height comparison.
+	bi, initialSync, isSynchronized, bestHeight, lastSync, startSync := is.GetSyncMetricsSnapshot()
+	// Note: a cached BackendError is deliberately not forced to inSync=false here. That
+	// force was sticky for up to a full resync period after the backend recovered (bi is
+	// only refreshed at the end of a resync iteration) and disagreed with /api, which
+	// re-queries live. A genuine backend outage freezes bi.Blocks and lastSync, so the
+	// freshness check below degrades EVM chains to 0 on its own; a stalled backend is the
+	// job of blockbook_tip_age_seconds and the backend-stuck rules, not this gauge.
+	inSync := systemInfoInSync(isSynchronized, initialSync, syncChainType(chain), bestHeight,
+		bi.Blocks, lastSync, startSync, time.Now().UTC(), syncBlockPeriod(chain, is))
+
+	metrics.BlockbookBestHeight.Set(float64(bestHeight))
+	if bi.Blocks > 0 {
+		metrics.BackendBestHeight.Set(float64(bi.Blocks))
+	}
+	synchronized := 0.0
+	if inSync {
+		synchronized = 1
+	}
+	metrics.Synchronized.Set(synchronized)
+	initial := 0.0
+	if initialSync {
+		initial = 1
+	}
+	metrics.InitialSync.Set(initial)
 }
 
 // GetSystemInfo returns information about system
@@ -2692,20 +2786,7 @@ func (w *Worker) GetSystemInfo(internal bool) (*SystemInfo, error) {
 	start := time.Now().UTC()
 	vi := common.GetVersionInfo()
 	inSync, bestHeight, lastBlockTime, startSync := w.is.GetSyncState()
-	blockPeriod := time.Duration(w.is.GetAvgBlockPeriod()) * time.Second
-	// Prefer the configured per-coin cadence (averageBlockTimeMs): it is stable,
-	// available before enough blocks are observed for GetAvgBlockPeriod to be
-	// computed (which otherwise returns 0 and disables the EVM sync checks below),
-	// and is the same value the tip watchdog uses. Using the duration directly also
-	// covers sub-second chains (e.g. Arbitrum at 250ms) that round to 0 seconds.
-	// Fall back to the runtime-observed average when the coin does not configure one.
-	if p, ok := w.chain.(interface {
-		AverageBlockTimeDuration() (time.Duration, error)
-	}); ok {
-		if d, err := p.AverageBlockTimeDuration(); err == nil && d > 0 {
-			blockPeriod = d
-		}
-	}
+	blockPeriod := syncBlockPeriod(w.chain, w.is)
 	inSyncMempool, lastMempoolTime, mempoolSize := w.is.GetMempoolSyncState()
 	ci, err := w.chain.GetChainInfo()
 	var backendError string
@@ -2717,7 +2798,7 @@ func (w *Worker) GetSystemInfo(internal bool) (*SystemInfo, error) {
 		inSync = false
 		inSyncMempool = false
 	} else {
-		inSync = systemInfoInSync(inSync, w.is.InitialSync, w.chainType, bestHeight, ci.Blocks, lastBlockTime, startSync, time.Now().UTC(), blockPeriod)
+		inSync = systemInfoInSync(inSync, w.is.GetInitialSync(), w.chainType, bestHeight, ci.Blocks, lastBlockTime, startSync, time.Now().UTC(), blockPeriod)
 	}
 	var columnStats []common.InternalStateColumn
 	var internalDBSize int64
@@ -2738,7 +2819,7 @@ func (w *Worker) GetSystemInfo(internal bool) (*SystemInfo, error) {
 		GitCommit:                    vi.GitCommit,
 		BuildTime:                    vi.BuildTime,
 		SyncMode:                     w.is.SyncMode,
-		InitialSync:                  w.is.InitialSync,
+		InitialSync:                  w.is.GetInitialSync(),
 		InSync:                       inSync,
 		BestHeight:                   bestHeight,
 		LastBlockTime:                lastBlockTime,

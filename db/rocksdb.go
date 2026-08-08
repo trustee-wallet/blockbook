@@ -746,9 +746,12 @@ func (d *RocksDB) ConnectBlock(block *bchain.Block) error {
 	if err := d.WriteBatch(wb); err != nil {
 		return err
 	}
-	avg := d.is.SetBlockTime(block.Height, uint32(block.Time))
+	// Fractional seconds: the integer average truncates to 0 on sub-second chains, which
+	// silently excludes them from any rule gated on this gauge being > 0. SetBlockTime
+	// returns the value under the write lock so this hot path takes is.mux only once.
+	avgBlockPeriodSeconds := d.is.SetBlockTime(block.Height, uint32(block.Time))
 	if d.metrics != nil {
-		d.metrics.AvgBlockPeriod.Set(float64(avg))
+		d.metrics.AvgBlockPeriod.Set(avgBlockPeriodSeconds)
 	}
 	if d.metrics != nil {
 		if chainType == bchain.ChainBitcoinType {
@@ -2297,9 +2300,9 @@ func (d *RocksDB) setBlockTimes() {
 		glog.Error("rocksdb: cannot load block times ", err)
 		return
 	}
-	avg := d.is.SetBlockTimes(bt)
+	avgBlockPeriodSeconds := d.is.SetBlockTimes(bt)
 	if d.metrics != nil {
-		d.metrics.AvgBlockPeriod.Set(float64(avg))
+		d.metrics.AvgBlockPeriod.Set(avgBlockPeriodSeconds)
 	}
 	glog.Info("rocksdb: processed block times in ", time.Since(start))
 }

@@ -141,6 +141,22 @@ func NewSyncWorkerWithConfig(db *RocksDB, chain bchain.BlockChain, syncWorkers, 
 	}, nil
 }
 
+// Values of the `error` label on blockbook_index_resync_errors. The label used to be a
+// constant "failure" at every site, which made it impossible to tell an unreachable
+// backend from a failing block connect - the distinction that decides whether to look at
+// the backend or at Blockbook. The set is deliberately tiny and stable so it stays safe
+// to alert and group on.
+const (
+	// errorResync: the resync iteration itself returned an error, cause not attributed.
+	errorResync = "resync"
+	// errorGetBlockHash: the backend did not answer GetBlockHash for a height being connected.
+	errorGetBlockHash = "get_block_hash"
+	// errorGetBlock: a retryable failure fetching a block from the backend.
+	errorGetBlock = "get_block"
+	// errorConnectBlock: fetching or connecting a block failed inside a sync worker.
+	errorConnectBlock = "connect_block"
+)
+
 // syncNotNeeded is returned by resyncIndex when the local tip already matches
 // the backend tip. ResyncIndex treats it as a successful no-op.
 var syncNotNeeded = errors.New("sync not needed")
@@ -180,7 +196,9 @@ func (w *SyncWorker) updateBackendInfo() {
 	// Refresh tip-age on every resync outcome (nil/syncNotNeeded/error), not only on a
 	// successful connect: during a silent stall resyncIndex returns syncNotNeeded each
 	// run, so without this the gauge would only be refreshed by the ~15-minute app-info
-	// loop. A climbing blockbook_tip_age_seconds is the primary stall signal.
+	// loop. A climbing blockbook_tip_age_seconds means the BACKEND's height stopped
+	// changing; an indexer that has stalled behind a healthy backend keeps this near zero,
+	// and shows up in blockbook_best_height instead (refreshed just below).
 	w.metrics.BackendTipAgeSeconds.Set(time.Since(w.is.GetBackendTipLastAdvance()).Seconds())
 }
 
@@ -221,7 +239,7 @@ func (w *SyncWorker) ResyncIndex(onNewBlock bchain.OnNewBlockFunc, initialSync b
 		return nil
 	}
 
-	w.metrics.IndexResyncErrors.With(common.Labels{"error": "failure"}).Inc()
+	w.metrics.IndexResyncErrors.With(common.Labels{"error": errorResync}).Inc()
 
 	return err
 }
@@ -611,7 +629,7 @@ ConnectLoop:
 			hash, err = w.chain.GetBlockHash(h)
 			if err != nil {
 				glog.Error("GetBlockHash error ", err)
-				w.metrics.IndexResyncErrors.With(common.Labels{"error": "failure"}).Inc()
+				w.metrics.IndexResyncErrors.With(common.Labels{"error": errorGetBlockHash}).Inc()
 				time.Sleep(time.Millisecond * 500)
 				continue
 			}
@@ -745,7 +763,7 @@ GetBlockLoop:
 					loopStart = time.Now()
 					glog.Error("getBlockWorker ", i, " connect block error ", err, ". Retrying...")
 				}
-				w.metrics.IndexResyncErrors.With(common.Labels{"error": "failure"}).Inc()
+				w.metrics.IndexResyncErrors.With(common.Labels{"error": errorConnectBlock}).Inc()
 				select {
 				case <-terminating:
 					return
@@ -851,7 +869,7 @@ ConnectLoop:
 			hash, err = w.chain.GetBlockHash(h)
 			if err != nil {
 				glog.Error("GetBlockHash error ", err)
-				w.metrics.IndexResyncErrors.With(common.Labels{"error": "failure"}).Inc()
+				w.metrics.IndexResyncErrors.With(common.Labels{"error": errorGetBlockHash}).Inc()
 				time.Sleep(time.Millisecond * 500)
 				continue
 			}
@@ -986,7 +1004,7 @@ func (w *SyncWorker) getBlockChain(out chan blockResult, done chan struct{}) {
 				}
 				return
 			}
-			w.metrics.IndexResyncErrors.With(common.Labels{"error": "failure"}).Inc()
+			w.metrics.IndexResyncErrors.With(common.Labels{"error": errorGetBlock}).Inc()
 			select {
 			case <-done:
 				return

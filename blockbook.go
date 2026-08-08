@@ -362,8 +362,29 @@ func mainWithExitCode() int {
 
 	if *synchronize {
 		internalState.SyncMode = true
-		internalState.InitialSync = true
-		if err := syncWorker.ResyncIndex(nil, true); err != nil {
+		internalState.SetInitialSync(true)
+		refreshSyncMetrics()
+		// Keep the sync gauges live during the initial build/reindex. It can run for hours
+		// to days, and syncIndexLoop and storeInternalStateLoop - the usual refreshers -
+		// are only started after it returns, so without this ticker the single sample
+		// above would be the only one taken during the whole initial sync and a stall
+		// partway through would be invisible on initial_sync and synchronized.
+		stopInitialRefresh := make(chan struct{})
+		go func() {
+			t := time.NewTicker(30 * time.Second)
+			defer t.Stop()
+			for {
+				select {
+				case <-stopInitialRefresh:
+					return
+				case <-t.C:
+					refreshSyncMetrics()
+				}
+			}
+		}()
+		err := syncWorker.ResyncIndex(nil, true)
+		close(stopInitialRefresh)
+		if err != nil {
 			if err != db.ErrOperationInterrupted {
 				glog.Error("resyncIndex ", err)
 				return exitCodeFatal
@@ -388,7 +409,8 @@ func mainWithExitCode() int {
 		internalState.FinishedMempoolSync(mempoolCount)
 		go syncIndexLoop()
 		go syncMempoolLoop()
-		internalState.InitialSync = false
+		internalState.SetInitialSync(false)
+		refreshSyncMetrics()
 	}
 	go storeInternalStateLoop()
 
@@ -526,37 +548,67 @@ func performRollback() error {
 	return nil
 }
 
+// refreshSyncMetrics publishes the sync-state gauges (synchronized, initial_sync and both
+// heights) from internal state, with no backend round trip. It is called on every
+// storeInternalStateLoop tick (~60s), after every sync iteration, at the two points
+// is.InitialSync flips, on a ~30s ticker during the initial build (before those loops
+// start), and from the app-info loop, so none of these gauges depends on the ~15-minute
+// app-info loop for its cadence.
+func refreshSyncMetrics() {
+	if chain == nil {
+		return
+	}
+	api.RefreshSyncMetrics(internalState, chain, metrics)
+}
+
 func blockbookAppInfoMetric(db *db.RocksDB, chain bchain.BlockChain, txCache *db.TxCache, is *common.InternalState, metrics *common.Metrics) error {
-	api, err := api.NewWorker(db, chain, mempool, txCache, metrics, is, fiatRates)
+	// not named `api`: that shadowed the package for the rest of the function.
+	w, err := api.NewWorker(db, chain, mempool, txCache, metrics, is, fiatRates)
 	if err != nil {
 		return err
 	}
-	si, err := api.GetSystemInfo(false)
+	si, err := w.GetSystemInfo(false)
 	if err != nil {
 		return err
 	}
-	subversion := si.Backend.Subversion
+	// app_info carries purely local blockbook_* labels (version/commit/buildtime) that
+	// identify the instance and need no backend, so the series must be published even when
+	// the backend is unreachable - that is exactly the instance an operator needs to find.
+	// On a backend error the backend_* labels and the height fall back to the last known
+	// good BackendInfo this build retains, instead of blanking the whole series to zero.
+	backend := *si.Backend // value copy: si.Backend is a pointer, don't mutate it in place
+	if backend.BackendError != "" {
+		bi := is.GetBackendInfo()
+		backend.Version = bi.Version
+		backend.Subversion = bi.Subversion
+		backend.ConsensusVersion = bi.ConsensusVersion
+		backend.ProtocolVersion = bi.ProtocolVersion
+		backend.Blocks = bi.Blocks
+	}
+	subversion := backend.Subversion
 	if subversion == "" {
 		// for coins without subversion (ETH) use ConsensusVersion as subversion in metrics
-		subversion = si.Backend.ConsensusVersion
+		subversion = backend.ConsensusVersion
 	}
-
 	metrics.BlockbookAppInfo.Reset()
 	metrics.BlockbookAppInfo.With(common.Labels{
 		"blockbook_version":        si.Blockbook.Version,
 		"blockbook_commit":         si.Blockbook.GitCommit,
 		"blockbook_buildtime":      si.Blockbook.BuildTime,
-		"backend_version":          si.Backend.Version,
+		"backend_version":          backend.Version,
 		"backend_subversion":       subversion,
-		"backend_protocol_version": si.Backend.ProtocolVersion}).Set(float64(0))
-	metrics.BackendBestHeight.Set(float64(si.Backend.Blocks))
-	metrics.BackendTipAgeSeconds.Set(time.Since(is.GetBackendTipLastAdvance()).Seconds())
-	metrics.BlockbookBestHeight.Set(float64(si.Blockbook.BestHeight))
-	synchronized := 0.0
-	if si.Blockbook.InSync {
-		synchronized = 1
+		"backend_protocol_version": backend.ProtocolVersion}).Set(float64(0))
+	if backend.Blocks > 0 {
+		metrics.BackendBestHeight.Set(float64(backend.Blocks))
 	}
-	metrics.Synchronized.Set(synchronized)
+	metrics.BackendTipAgeSeconds.Set(time.Since(is.GetBackendTipLastAdvance()).Seconds())
+	// blockbook_synchronized, blockbook_best_height and blockbook_backend_best_height are
+	// owned by RefreshSyncMetrics (called from the sync loop and the ~60s state loop).
+	// Writing blockbook_synchronized here as well made two writers disagree - this path
+	// derived it from a live GetChainInfo tip while RefreshSyncMetrics uses the cached one
+	// - so the gauge oscillated on the app-info period. Publish it from the single shared
+	// path instead of recomputing it here.
+	api.RefreshSyncMetrics(is, chain, metrics)
 	return nil
 }
 
@@ -633,6 +685,12 @@ func syncIndexLoop() {
 	glog.Info("syncIndexLoop starting")
 	// resync index about every 15 minutes if there are no chanSyncIndex requests, with debounce 1 second
 	common.TickAndDebounce(time.Duration(*resyncIndexPeriodMs)*time.Millisecond, time.Duration(*resyncIndexDebounceMs)*time.Millisecond, chanSyncIndex, func() {
+		// Publish the sync-state gauges after every iteration whatever its outcome. The
+		// early returns below make a defer the only placement that covers all of them,
+		// and the interesting case is precisely the quiet one: during a silent stall
+		// resyncIndex keeps returning syncNotNeeded, so nothing else would move the
+		// gauges until the ~60s storeInternalStateLoop tick.
+		defer refreshSyncMetrics()
 		if err := syncWorker.ResyncIndex(onNewBlock, false); err != nil {
 			if err == db.ErrOperationInterrupted || common.IsInShutdown() {
 				return
@@ -708,6 +766,12 @@ func storeInternalStateLoop() {
 		glog.Info("storeInternalStateLoop starting with db stats compute disabled")
 	}
 	common.TickAndDebounce(storeInternalStatePeriodMs*time.Millisecond, (storeInternalStatePeriodMs-1)*time.Millisecond, chanStoreInternalState, func() {
+		// Republish the sync-state gauges every tick (~60s) - the guaranteed freshness
+		// floor. syncIndexLoop also refreshes them, but a blockbook whose tip feed went
+		// quiet only wakes on the resyncindexperiod backstop (~15.6 min), which is how far
+		// blockbook_synchronized used to lag reality. RefreshSyncMetrics reads internal
+		// state only, no backend RPCs, so it is cheap to run unconditionally.
+		refreshSyncMetrics()
 		if (*dbStatsPeriodHours) > 0 && !computeRunning && lastCompute.Add(computePeriod).Before(time.Now()) {
 			computeRunning = true
 			go func() {
