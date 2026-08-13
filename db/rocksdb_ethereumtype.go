@@ -740,7 +740,9 @@ func (d *RocksDB) processAddressesEthereumType(block *bchain.Block, addresses ad
 	return blockTxs, nil
 }
 
-// ReconnectInternalDataToBlockEthereumType adds missing internal data to the block and stores them in db
+// ReconnectInternalDataToBlockEthereumType adds internal data to an already indexed block
+// whose internal data failed during sync, and stores them together with the contracts the
+// block created or destroyed.
 func (d *RocksDB) ReconnectInternalDataToBlockEthereumType(block *bchain.Block) error {
 	d.connectBlockMux.Lock()
 	defer d.connectBlockMux.Unlock()
@@ -749,6 +751,18 @@ func (d *RocksDB) ReconnectInternalDataToBlockEthereumType(block *bchain.Block) 
 	defer wb.Destroy()
 	if d.chainParser.GetChainType() != bchain.ChainEthereumType {
 		return errors.New("Unsupported chain type")
+	}
+	// The caller resolved this block from a snapshot of the error queue and then fetched
+	// it by hash, so a reorg in between can leave it orphaned - its transactions are no
+	// longer indexed and their internal data must not be written back. Checking here
+	// rather than in the caller makes it exact: connect, disconnect and this reconnect all
+	// hold connectBlockMux, so no reorg can land between the check and the write below.
+	indexedHash, err := d.GetBlockHash(block.Height)
+	if err != nil {
+		return err
+	}
+	if indexedHash != block.Hash {
+		return errors.Errorf("block %d hash changed from %s to %s, possible reorg, skipping", block.Height, block.Hash, indexedHash)
 	}
 	if d.hotAddrTracker != nil {
 		d.hotAddrTracker.BeginBlock()
@@ -762,17 +776,30 @@ func (d *RocksDB) ReconnectInternalDataToBlockEthereumType(block *bchain.Block) 
 	for txi := range block.Txs {
 		tx := &block.Txs[txi]
 		eid, _ := tx.CoinSpecificData.(bchain.EthereumSpecificData)
-		if eid.InternalData != nil {
-			btxID, err := d.chainParser.PackTxid(tx.Txid)
-			if err != nil {
-				return err
-			}
-			blockTx := &blockTxs[txi]
-			blockTx.btxID = btxID
-			tx.BlockHeight = block.Height
-			if err = d.processInternalData(blockTx, tx, eid.InternalData, addresses, addressContracts, true); err != nil {
-				return err
-			}
+		if eid.InternalData == nil {
+			continue
+		}
+		btxID, err := d.chainParser.PackTxid(tx.Txid)
+		if err != nil {
+			return err
+		}
+		// addToAddressesAndContractsEthereumType increments InternalTxs and NonContractTxs
+		// unconditionally - only TotalTxs is deduplicated - so storing internal data that
+		// are already indexed would inflate the counters permanently, while a later
+		// disconnect decrements them only once. A queued block never holds internal data,
+		// but skipping the transactions that do makes that invariant hold by construction.
+		stored, err := d.hasEthereumInternalData(btxID)
+		if err != nil {
+			return err
+		}
+		if stored {
+			continue
+		}
+		blockTx := &blockTxs[txi]
+		blockTx.btxID = btxID
+		tx.BlockHeight = block.Height
+		if err = d.processInternalData(blockTx, tx, eid.InternalData, addresses, addressContracts, true); err != nil {
+			return err
 		}
 	}
 
@@ -784,6 +811,15 @@ func (d *RocksDB) ReconnectInternalDataToBlockEthereumType(block *bchain.Block) 
 	}
 	if err := d.storeAddresses(wb, block.Height, addresses); err != nil {
 		return err
+	}
+	// The contracts are a product of the internal data fetch, so the failed sync stored
+	// none of them. The block's address aliases are deliberately left alone: they come
+	// from the logs, which succeeded, so sync already stored them, and rewriting them now
+	// would replace the names of that time with whatever they resolve to today.
+	if blockSpecificData, _ := block.CoinSpecificData.(*bchain.EthereumBlockSpecificData); blockSpecificData != nil {
+		if err := d.storeHealedContractInfos(wb, blockSpecificData.Contracts); err != nil {
+			return err
+		}
 	}
 	// remove the block from the internal errors table
 	wb.DeleteCF(d.cfh[cfBlockInternalDataErrors], packUint(block.Height))
@@ -960,6 +996,16 @@ func (d *RocksDB) GetEthereumInternalData(txid string) (*bchain.EthereumInternal
 	return d.getEthereumInternalData(btxID)
 }
 
+// hasEthereumInternalData reports whether internal data are already stored for the tx.
+func (d *RocksDB) hasEthereumInternalData(btxID []byte) (bool, error) {
+	val, err := d.db.GetCF(d.ro, d.cfh[cfInternalData], btxID)
+	if err != nil {
+		return false, err
+	}
+	defer val.Free()
+	return len(val.Data()) > 0, nil
+}
+
 func (d *RocksDB) getEthereumInternalData(btxID []byte) (*bchain.EthereumInternalData, error) {
 	val, err := d.db.GetCF(d.ro, d.cfh[cfInternalData], btxID)
 	if err != nil {
@@ -1044,6 +1090,40 @@ func (d *RocksDB) StoreBlockInternalDataErrorEthereumType(wb *grocksdb.WriteBatc
 	return nil
 }
 
+// UpdateBlockInternalDataErrorEthereumType rewrites the queued error of the block at
+// height with a new failure count and message, but only while the queue still holds an
+// entry for hash. A healing pass reports from a snapshot taken before it started, so by
+// the time it charges a failure the entry may have been removed by a rollback or replaced
+// by a different block at the same height; a plain put would resurrect or overwrite it.
+func (d *RocksDB) UpdateBlockInternalDataErrorEthereumType(height uint32, hash string, message string, retryCount uint8) error {
+	if hash == "" {
+		return nil
+	}
+	d.connectBlockMux.Lock()
+	defer d.connectBlockMux.Unlock()
+	val, err := d.db.GetCF(d.ro, d.cfh[cfBlockInternalDataErrors], packUint(height))
+	if err != nil {
+		return err
+	}
+	defer val.Free()
+	storedHash, _, _, err := d.unpackBlockInternalDataError(val.Data())
+	if err != nil {
+		return err
+	}
+	if storedHash != hash {
+		glog.Infof("UpdateBlockInternalDataErrorEthereumType %d %s: no longer queued, update skipped", height, hash)
+		return nil
+	}
+	wb := grocksdb.NewWriteBatch()
+	defer wb.Destroy()
+	if err := d.StoreBlockInternalDataErrorEthereumType(wb, &bchain.Block{
+		BlockHeader: bchain.BlockHeader{Hash: hash, Height: height},
+	}, message, retryCount); err != nil {
+		return err
+	}
+	return d.WriteBatch(wb)
+}
+
 type BlockInternalDataError struct {
 	Height       uint32
 	Hash         string
@@ -1106,8 +1186,12 @@ func (d *RocksDB) storeBlockSpecificDataEthereumType(wb *grocksdb.WriteBatch, bl
 				return err
 			}
 		}
+		// registry events of one block may create and destroy the same
+		// (ephemeral) contract - the in-batch map lets the destruction merge
+		// into the creation written a moment ago
+		inBatch := make(map[string]*bchain.ContractInfo)
 		for i := range blockSpecificData.Contracts {
-			if err := d.storeContractInfo(wb, &blockSpecificData.Contracts[i]); err != nil {
+			if err := d.storeContractInfo(wb, &blockSpecificData.Contracts[i], inBatch); err != nil {
 				return err
 			}
 		}
@@ -1308,18 +1392,78 @@ func (d *RocksDB) disconnectAddress(btxID []byte, internal bool, addrDesc bchain
 	return nil
 }
 
-func (d *RocksDB) disconnectInternalData(btxID []byte, addresses map[string]map[string]struct{}, contracts map[string]*unpackedAddrContracts) error {
+// contractRegistryRollback holds the pending cfContracts rows of a whole
+// disconnected range, so a later block's destruction reset composes with an
+// earlier block's creation removal.
+type contractRegistryRollback struct {
+	// nil = delete the row
+	rows map[string]*bchain.ContractInfo
+	// height whose destruction frame was already rolled back, per key
+	destroyedAt map[string]uint32
+}
+
+func newContractRegistryRollback() *contractRegistryRollback {
+	return &contractRegistryRollback{
+		rows:        make(map[string]*bchain.ContractInfo),
+		destroyedAt: make(map[string]uint32),
+	}
+}
+
+// rollbackContractRegistryRow reverts the cfContracts row of a contract created
+// or destroyed in the disconnected block.
+func (d *RocksDB) rollbackContractRegistryRow(addrDesc bchain.AddressDescriptor, height uint32, destroyed bool, rollback *contractRegistryRollback) error {
+	key := string(addrDesc)
+	ci, pending := rollback.rows[key]
+	if !pending {
+		stored, err := d.GetContractInfo(addrDesc, "")
+		if err != nil {
+			return err
+		}
+		if stored == nil {
+			return nil
+		}
+		// copy - the shared cached value must not change before the batch commits
+		ciCopy := *stored
+		ci = &ciCopy
+	}
+	if ci == nil {
+		// already deleted by a creation rollback
+		return nil
+	}
+	if destroyed {
+		rollback.destroyedAt[key] = height
+		if ci.DestructedInBlock == height {
+			ci.DestructedInBlock = 0
+			rollback.rows[key] = ci
+		}
+	} else if ci.CreatedInBlock == height {
+		// a same-block destroy-then-recreate overwrote the pre-range CreatedInBlock,
+		// so only an unseen destruction proves the contract originated here - keeping
+		// a stale row beats dropping a contract that is live on the canonical chain
+		if destroyedAt, ok := rollback.destroyedAt[key]; !ok || destroyedAt != height {
+			rollback.rows[key] = nil
+		}
+	}
+	return nil
+}
+
+func (d *RocksDB) disconnectInternalData(btxID []byte, height uint32, addresses map[string]map[string]struct{}, contracts map[string]*unpackedAddrContracts, registryRollback *contractRegistryRollback) error {
 	internalData, err := d.getEthereumInternalData(btxID)
 	if err != nil {
 		return err
 	}
 	if internalData != nil {
+		// destructions arrive only as transfer frames below: the persisted tx type
+		// is one bit (CALL|CREATE), so a root SELFDESTRUCT cannot round-trip
 		if internalData.Type == bchain.CREATE {
 			contract, err := d.chainParser.GetAddrDescFromAddress(internalData.Contract)
 			if err != nil {
 				return err
 			}
 			if err := d.disconnectAddress(btxID, true, contract, nil, addresses, contracts); err != nil {
+				return err
+			}
+			if err := d.rollbackContractRegistryRow(contract, height, false, registryRollback); err != nil {
 				return err
 			}
 		}
@@ -1342,12 +1486,22 @@ func (d *RocksDB) disconnectInternalData(btxID []byte, addresses map[string]map[
 					return err
 				}
 			}
+			// revert the registry events emitted by nested creates and suicides
+			if t.Type == bchain.CREATE {
+				if err := d.rollbackContractRegistryRow(to, height, false, registryRollback); err != nil {
+					return err
+				}
+			} else if t.Type == bchain.SELFDESTRUCT {
+				if err := d.rollbackContractRegistryRow(from, height, true, registryRollback); err != nil {
+					return err
+				}
+			}
 		}
 	}
 	return nil
 }
 
-func (d *RocksDB) disconnectBlockTxsEthereumType(wb *grocksdb.WriteBatch, height uint32, blockTxs []ethBlockTx, contracts map[string]*unpackedAddrContracts) error {
+func (d *RocksDB) disconnectBlockTxsEthereumType(wb *grocksdb.WriteBatch, height uint32, blockTxs []ethBlockTx, contracts map[string]*unpackedAddrContracts, registryRollback *contractRegistryRollback) error {
 	glog.Info("Disconnecting block ", height, " containing ", len(blockTxs), " transactions")
 	addresses := make(map[string]map[string]struct{})
 	for i := range blockTxs {
@@ -1362,7 +1516,7 @@ func (d *RocksDB) disconnectBlockTxsEthereumType(wb *grocksdb.WriteBatch, height
 			}
 		}
 		// internal data
-		err := d.disconnectInternalData(blockTx.btxID, addresses, contracts)
+		err := d.disconnectInternalData(blockTx.btxID, height, addresses, contracts, registryRollback)
 		if err != nil {
 			return err
 
@@ -1412,8 +1566,9 @@ func (d *RocksDB) DisconnectBlockRangeEthereumType(lower uint32, higher uint32) 
 	wb := grocksdb.NewWriteBatch()
 	defer wb.Destroy()
 	contracts := make(map[string]*unpackedAddrContracts)
+	registryRollback := newContractRegistryRollback()
 	for height := higher; height >= lower; height-- {
-		if err := d.disconnectBlockTxsEthereumType(wb, height, blocks[height-lower], contracts); err != nil {
+		if err := d.disconnectBlockTxsEthereumType(wb, height, blocks[height-lower], contracts, registryRollback); err != nil {
 			return err
 		}
 		key := packUint(height)
@@ -1422,6 +1577,15 @@ func (d *RocksDB) DisconnectBlockRangeEthereumType(lower uint32, higher uint32) 
 		wb.DeleteCF(d.cfh[cfBlockInternalDataErrors], key)
 	}
 	d.storeUnpackedAddressContracts(wb, contracts)
+	// Revert contract registry rows whose creation or destruction was
+	// disconnected; the reorgGen bump below invalidates their cache entries.
+	for key, ci := range registryRollback.rows {
+		if ci == nil {
+			wb.DeleteCF(d.cfh[cfContracts], []byte(key))
+		} else {
+			wb.PutCF(d.cfh[cfContracts], []byte(key), packContractInfo(ci))
+		}
+	}
 	// Revert protocol rows whose persistHeight fell into [lower,higher].
 	if err := d.disconnectErcProtocols(wb, lower, higher); err != nil {
 		return err
