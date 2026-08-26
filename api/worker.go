@@ -1277,7 +1277,7 @@ func (w *Worker) getEthereumTypeAddressBalances(addrDesc bchain.AddressDescripto
 		if b != nil {
 			ba.BalanceSat = *b
 		}
-		nPending, nConfirmed, confirmedNonceOK, err = w.chain.EthereumTypeGetNonces(addrDesc, filter.WithConfirmedNonce)
+		nPending, nConfirmed, confirmedNonceOK, err = w.chain.EthereumTypeGetNonces(addrDesc, filter.WithConfirmedNonce, filter.PrivatePendingNonces...)
 		if err != nil {
 			return nil, nil, errors.Annotatef(err, "EthereumTypeGetNonces %v", addrDesc)
 		}
@@ -2660,10 +2660,20 @@ const (
 	// and the floor is what lets a fast chain's configured cadence be corrected downwards
 	// without tightening this check.
 	systemInfoMinStale = 30 * time.Second
-	// systemInfoSyncedGap is how far the indexed height may trail the backend tip and
-	// still count as synchronized. It covers the one-block window between the tip
+	// systemInfoSyncedGap is the floor for how far the indexed height may trail the backend
+	// tip and still count as synchronized. It covers the one-block window between the tip
 	// advancing and that block being connected, which would otherwise flap the status.
 	systemInfoSyncedGap = 1
+	// systemInfoSyncedGapWindow turns that floor into wall clock. One block is 12s of slack
+	// on Ethereum but 0.25s on Arbitrum, where an excursion peaking at 211 blocks - 53s of
+	// real lag - read as out-of-sync and paged. Same value as systemInfoMinStale on purpose:
+	// under 30s is jitter for both checks.
+	systemInfoSyncedGapWindow = systemInfoMinStale
+	// systemInfoMinBlockPeriod floors the cadence the window is divided by, capping the
+	// derived tolerance at 300 blocks. 100ms is the fastest cadence any supported chain
+	// configures (Robinhood); anything smaller is a misconfigured averageBlockTimeMs or
+	// a degenerate observed average.
+	systemInfoMinBlockPeriod = 100 * time.Millisecond
 )
 
 // systemInfoInSync decides the externally reported in-sync state from the raw
@@ -2685,6 +2695,11 @@ func systemInfoInSync(inSync bool, initialSync bool, chainType bchain.ChainType,
 	if blockPeriod <= 0 {
 		return inSync
 	}
+	// Neither input path validates the cadence beyond > 0, and the gap tolerance below
+	// scales linearly with it, so floor it to bound what a bad value can buy.
+	if blockPeriod < systemInfoMinBlockPeriod {
+		blockPeriod = systemInfoMinBlockPeriod
+	}
 
 	threshold := systemInfoStaleBlocks * blockPeriod
 	if threshold < systemInfoMinStale {
@@ -2692,13 +2707,29 @@ func systemInfoInSync(inSync bool, initialSync bool, chainType bchain.ChainType,
 	}
 	isFresh := !lastBlockTime.Add(threshold).Before(now)
 
-	// A sync loop can stay inside ResyncIndex while new blocks keep arriving. If the
-	// indexed height is at (or within one block of) the backend tip and the index was
-	// updated recently, report the externally observable state as synchronized. int64
-	// avoids underflow if the backend momentarily reports a lower tip; gap >= 0 keeps an
-	// "ahead of tip" read from qualifying.
+	// Tolerate the blocks the chain produces inside the window, never fewer than one.
+	// Derived from the constant, not from threshold above: 12 block times divided by the
+	// block time is 12 blocks on every chain, which would stretch Bitcoin to two hours.
+	syncedGap := int64(systemInfoSyncedGap)
+	if lag := int64(systemInfoSyncedGapWindow / blockPeriod); lag > syncedGap {
+		syncedGap = lag
+	}
+
+	// A sync loop can stay inside ResyncIndex while new blocks keep arriving. If the indexed
+	// height is at (or close behind) the backend tip and the index was updated recently,
+	// report the externally observable state as synchronized. int64 avoids underflow if the
+	// backend reports a lower tip.
 	gap := int64(backendBlocks) - int64(bestHeight)
-	if !inSync && !initialSync && gap >= 0 && gap <= systemInfoSyncedGap && isFresh {
+	// A negative gap is the steady state for RefreshSyncMetrics, whose backend tip is a
+	// snapshot from the end of the previous resync iteration, so the same distance is
+	// tolerated in both directions. backendBlocks > 0 keeps the rescue from firing before
+	// any tip was observed.
+	if gap < 0 {
+		// Bounded, not clamped to zero: disconnect/reconnect churn refreshes LastSync,
+		// so an index far past a live tip would read fresh indefinitely.
+		gap = -gap
+	}
+	if !inSync && !initialSync && backendBlocks > 0 && gap <= syncedGap && isFresh {
 		return true
 	}
 
