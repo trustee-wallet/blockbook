@@ -1497,6 +1497,11 @@ func (b *EthereumRPC) computeConfirmations(n uint64) (uint32, error) {
 		return 0, err
 	}
 	bn := bh.Number().Uint64()
+	// The cached tip is advanced asynchronously, so a block fetched straight from the
+	// backend can be ahead of it; report the mined minimum instead of underflowing.
+	if bn < n {
+		return 1, nil
+	}
 	// transaction in the best block has 1 confirmation
 	return uint32(bn - n + 1), nil
 }
@@ -1522,6 +1527,11 @@ func (b *EthereumRPC) getBlockRaw(hash string, height uint32, fullTxs bool) (jso
 	}
 	b.observeEthSyncRpcError(method, err)
 	if err != nil {
+		// juju's Annotatef has no Unwrap, so annotating a sentinel hides it from
+		// errors.Is and disables getBlockChain's end-of-chain exit and retry accounting.
+		if stdErrors.Is(err, bchain.ErrBlockNotFound) {
+			return nil, err
+		}
 		return nil, errors.Annotatef(err, "hash %v, height %v", hash, height)
 	} else if len(raw) == 0 || (len(raw) == 4 && string(raw) == "null") {
 		return nil, bchain.ErrBlockNotFound
@@ -1548,6 +1558,11 @@ func (b *EthereumRPC) processEventsForBlock(blockNumber string) (map[string][]*b
 	})
 	b.observeEthSyncRpcError(method, err)
 	if err != nil {
+		// juju's Annotatef has no Unwrap; keep the sentinel bare so getBlockChain's
+		// end-of-chain exit and retry accounting still see ErrBlockNotFound.
+		if stdErrors.Is(err, bchain.ErrBlockNotFound) {
+			return nil, nil, err
+		}
 		return nil, nil, errors.Annotatef(err, "%s blockNumber %v", method, blockNumber)
 	}
 	r := make(map[string][]*bchain.RpcLog)
@@ -1616,15 +1631,20 @@ func (b *EthereumRPC) processCallTrace(call *rpcCallTrace, d *bchain.EthereumInt
 			To:    call.To,
 		})
 		contracts = append(contracts, bchain.ContractInfo{Contract: call.From, DestructedInBlock: blockHeight})
-	} else if call.Type == "DELEGATECALL" {
-		// ignore DELEGATECALL (geth v1.11 the changed tracer behavior)
-		// 	https://github.com/ethereum/go-ethereum/issues/26726
-	} else if err == nil && (value.BitLen() > 0 || b.ChainConfig.ProcessZeroInternalTransactions) {
-		d.Transfers = append(d.Transfers, bchain.EthereumInternalTransfer{
-			Value: *value,
-			From:  call.From,
-			To:    call.To,
-		})
+	} else if call.Type == "DELEGATECALL" || call.Type == "CALLCODE" || call.Type == "STATICCALL" {
+		// DELEGATECALL and CALLCODE run foreign code in the caller's own context, so their
+		// traced value never leaves the caller (geth v1.11 tracer change, issues #26726, #1225);
+		// STATICCALL cannot transfer value at all
+	} else if call.Type == "CALL" {
+		if err == nil && (value.BitLen() > 0 || b.ChainConfig.ProcessZeroInternalTransactions) {
+			d.Transfers = append(d.Transfers, bchain.EthereumInternalTransfer{
+				Value: *value,
+				From:  call.From,
+				To:    call.To,
+			})
+		}
+	} else if err == nil && value.BitLen() > 0 {
+		glog.Warningf("processCallTrace: unknown call type %q with value in block %d, not indexed", call.Type, blockHeight)
 	}
 	if call.Error != "" {
 		d.Error = call.Error
